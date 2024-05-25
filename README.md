@@ -67,6 +67,6 @@
 - Add new Regex
 
 **Additional**
-- URL Scan for leaked candidates were capped to 100.000 URLs due to performance issues.
+- URL Scan for leaked candidates were capped to 100.000 URLs due to performance, client/server capacity issues.
 - Normalized URLS / Subdomains means typical preprocessing operations (e.g. deduplicating)
 - Depending on the quantity of processed URLs, it can take a lot of time to make URL GET requests because of balancing general multiprocessing / asyncio limitations and DDOS Preventions.
