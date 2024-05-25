@@ -27,9 +27,6 @@ if __name__ == '__main__':
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    if 'linux' in sys.platform:
-        multiprocessing.set_start_method('fork')
-
     FG, BT, FR, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Style.RESET_ALL
 
     domains = ManageFiles().get_domains()
