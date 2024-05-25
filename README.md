@@ -54,7 +54,7 @@
 
 # **Changelog**
 - Please see Changelog for Updates:
-- https://github.com/PAST2212/credentialthreat/blob/main/Changelog
+- https://github.com/PAST2212/credentialthreat/blob/master/Changelog
 
 # **Notes**
 
