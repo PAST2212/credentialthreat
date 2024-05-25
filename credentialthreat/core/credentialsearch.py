@@ -46,7 +46,7 @@ class ScanerCredentials:
                                     return response_transform
 
                     except RetryError as e:
-                        _logger.error(f"Error: {str(type(e))}. Unsuccessful Connection Attempt to URL {network_files_tuple[1]}. Error Message: {str(e)}")
+                        _logger.error(f"Exception: {str(type(e))}. Unsuccessful Connection Attempt to URL {network_files_tuple[1]}. Exception Message: {str(e)}")
 
             await asyncio.sleep(0.250)
 
@@ -66,10 +66,10 @@ class ScanerCredentials:
             pass
 
         except (TypeError, aiohttp.TooManyRedirects, UnicodeDecodeError) as e:
-            _logger.error(f"Error: {str(type(e))}. Unsuccessful Connection Attempt to URL {network_files_tuple[1]}. Error Message: {str(e)}")
+            _logger.error(f"Exception: {str(type(e))}. Unsuccessful Connection Attempt to URL {network_files_tuple[1]}. Exception Message: {str(e)}")
 
         except Exception as e:
-            _logger.error(f"Error: {str(type(e))}. Unsuccessful Connection Attempt to URL {network_files_tuple[1]}. Error Message: {str(e)}")
+            _logger.error(f"Exception: {str(type(e))}. Unsuccessful Connection Attempt to URL {network_files_tuple[1]}. Exception Message: {str(e)}")
 
     async def _fetch_credentials(self, network_files_tuple):
         try:
