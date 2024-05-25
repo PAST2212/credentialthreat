@@ -78,7 +78,7 @@ class ScanerInternalLinks:
         # Async Retry Connection Attempt Exceptions
         except (aiohttp.client_exceptions.ServerDisconnectedError, aiohttp.client_exceptions.ServerConnectionError, aiohttp.client_exceptions.ServerTimeoutError, aiohttp.client_exceptions.ClientPayloadError) as e:
             self.blacklist.add(domain)
-            _logger.error(f"ConnectionRetryException. {retries} Unsuccessful Connection retries to URL {url}. Exception Message: {str(e)}")
+            #_logger.error(f"ConnectionRetryException. {retries} Unsuccessful Connection retries to URL {url}. Exception Message: {str(e)}")
 
         except Exception as e:
             self.blacklist.add(domain)
