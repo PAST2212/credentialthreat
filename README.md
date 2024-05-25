@@ -13,7 +13,7 @@
 - Making automatically get request retries (up to 3 times) in case of failing url get request
 
 **CSV Output Columns**
-- CSV File is created into data/output folder
+- CSV File is created into "credentialthreat/data/output" folder
 - Base URL: URL with affected sensitive data candidate; e.g. https://www.agilecommunity.ottogroup.com/de/medien/newsroom/
 - Affected Network Resource from Base URL: Network Resource File / URL that is (get) requested / connected with BASE URL; e.g. https://www.agilecommunity.ottogroup.com/wLayout22/wGlobal/layout/scripts/juicer.js
 - Registered Domain Base URL: Registered Domain of Base URL; e.g. ottogroup.com
