@@ -41,7 +41,7 @@
   ==> Make sure to make a backup of your userdata folder before update
 
 **Before the first run - How it Works:** 
-- Put your root domain(s) you want to scan into this TXT file "credentialthreat/data/input/domains.txt" line per line for scanning operations (with the TLD). Some "tui" domains are listed per default.
+- Put your root domain(s) you want to scan into this TXT file "credentialthreat/data/input/domains.txt" line per line for scanning operations (with the TLD). "hackerone.com" is listed per default.
 
 **Example Results:**
 

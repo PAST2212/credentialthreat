@@ -1,3 +1,2 @@
 # put here your domains line by line you want scan for leaked credentials
-tui.nl
-ottogroup.com
+hackerone.com
