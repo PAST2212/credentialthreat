@@ -67,6 +67,5 @@
 
 **Additional**
 - URL Scan for leaked candidates were capped to 100.000 URLs due to performance, client/server capacity issues.
-- Normalized URLS / Subdomains means typical preprocessing operations (e.g. deduplicating)
-- Depending on the quantity of processed URLs, it can take a lot of time to make URL GET requests because of balancing / tradeoff relation between general multiprocessing / asyncio limitations and DDOS Preventions.
+- Depending on the quantity of processed URLs, it can take a lot of time to make URL GET requests because of balancing / tradeoff relation between Speed, Parallel Processing Issues and DDOS Preventions.
 - Credits goes to Bug Bounty Hunter h4x0r-dz and his project https://github.com/h4x0r-dz/Leaked-Credentials . This project is based on his regex
