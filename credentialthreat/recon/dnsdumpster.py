@@ -50,7 +50,7 @@ class ScanerDnsDumpster:
             print('Other Error occured with dnsdumpster Subdomain Scan: ', e)
 
     async def tasks_rapiddns(self, fuzzy_results: list, session: aiohttp.ClientSession):
-        rate_limit = AsyncLimiter(1, 10) # One Reqeust every 10 Seconds
+        rate_limit = AsyncLimiter(1, 10)
         tasks = [self.dnsdumpster(session, y, rate_limit) for y in fuzzy_results]
         await asyncio.gather(*tasks)
 

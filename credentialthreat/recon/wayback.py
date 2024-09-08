@@ -2,6 +2,7 @@ import aiohttp
 from aiolimiter import AsyncLimiter
 import asyncio
 import json
+from typing import List, Set
 import datetime
 from credentialthreat.core import utils
 
@@ -36,7 +37,6 @@ class ScanerWaybackMachine:
                 else:
                     print('Other Status code occcured at wayback machine', response.status)
 
-
         except (TypeError, json.decoder.JSONDecodeError) as e:
             print(f'{type(e)}: Wayback Machine Fecth URL Error for fqdn: {fqdn}. Error Message: {e}')
 
@@ -51,6 +51,11 @@ class ScanerWaybackMachine:
         tasks = [self.hackertarget(session, y, rate_limit) for y in fqdn_list]
         await asyncio.gather(*tasks)
 
-    async def get_results(self, fqdn_list, session: aiohttp.ClientSession):
-        await self.tasks_wayback(fqdn_list, session)
+    async def _get_wayback_urls(self, iterables: List[str]) -> None:
+        timeout = aiohttp.ClientTimeout(total=None, sock_read=60, sock_connect=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            await self.tasks_wayback(iterables, session)
+
+    def get_results(self, iterables: List[str]) -> Set[str]:
+        asyncio.run(self._get_wayback_urls(iterables))
         return self.results
