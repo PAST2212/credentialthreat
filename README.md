@@ -1,5 +1,5 @@
 # credentialthreat
-**find leaked credentials and sensitive data (e.g. tokens, api keys, ...) on URLs / Host Names, Subdomains, Javascript Files based on a single Domain as input**
+**find leaked credentials and sensitive data (e.g. tokens, api keys, ...) based on URL, Subdomain & Javascript File Permutations**
 
 **Current Version 1.00**
 
@@ -63,11 +63,10 @@
 
 **TO DO**
 - PEP 8 Compliance
-- Design Adjustments
 - Add new Regex
 
 **Additional**
 - URL Scan for leaked candidates were capped to 100.000 URLs due to performance, client/server capacity issues.
 - Normalized URLS / Subdomains means typical preprocessing operations (e.g. deduplicating)
-- Depending on the quantity of processed URLs, it can take a lot of time to make URL GET requests because of balancing general multiprocessing / asyncio limitations and DDOS Preventions.
+- Depending on the quantity of processed URLs, it can take a lot of time to make URL GET requests because of balancing / tradeoff relation between general multiprocessing / asyncio limitations and DDOS Preventions.
 - Credits goes to Bug Bounty Hunter h4x0r-dz and his project https://github.com/h4x0r-dz/Leaked-Credentials . This project is based on his regex
