@@ -1,7 +1,7 @@
 # credentialthreat
 **find leaked credentials and sensitive data (e.g. tokens, api keys, ...) based on URL, Subdomain & Javascript File Permutations**
 
-**Current Version 1.00**
+**Current Version 1.11**
 
 # **Features**
 **Key Features**
@@ -10,14 +10,13 @@
 - Multiprocessing based on cpu cores
 - DDOS Prevention Instruments (e.g. time delays)
 - Scan up to 100.000 URLs / Network Files based on a single domain
-- Making automatically get request retries (up to 3 times) in case of failing url get request
 
 **CSV Output Columns**
 - CSV File is created into "credentialthreat/data/output" folder
 - Base URL: URL with affected sensitive data candidate; e.g. https://www.agilecommunity.ottogroup.com/de/medien/newsroom/
-- Affected Network Resource from Base URL: Network Resource File / URL that is (get) requested / connected with BASE URL; e.g. https://www.agilecommunity.ottogroup.com/wLayout22/wGlobal/layout/scripts/juicer.js
-- Registered Domain Base URL: Registered Domain of Base URL; e.g. ottogroup.com
-- Credential Leak Candidate: Predicted leaked data,  e.g. ('app_id', '731223346944897') <br>
+- Affected Network Resource from Base URL; e.g. https://www.agilecommunity.ottogroup.com/wLayout22/wGlobal/layout/scripts/juicer.js
+- Registered Domain of Base URL; e.g. ottogroup.com
+- Credential Sensitive Data Candidate; e.g. ('apikey', 'AIzaSyDjDleLPTuwqlLU9jKwAdw3LnWWl4TLO-c') <br>
 
 **Example Screenshot: Illustration of csv file and scanned sensitive data candidates**
 ![image](https://github.com/PAST2212/credentialthreat/assets/124390875/4c3dca5b-ff4b-4fbf-beef-7bf7f401e203)
@@ -66,6 +65,6 @@
 - Add new Regex
 
 **Additional**
-- URL Scan for leaked candidates were capped to 100.000 URLs due to performance, client/server capacity issues.
-- Depending on the quantity of processed URLs, it can take a lot of time to make URL GET requests because of balancing / tradeoff relation between Speed, Parallel Processing Issues and DDOS Preventions.
+- URL Scan for sensitive data candidates are currently capped to 100.000 URLs due to performance, client/server capacity issues.
+- It can take a lot of time to make GET requests because of tradeoff relation between Speed Performance and DDOS Preventions.
 - Credits goes to Bug Bounty Hunter h4x0r-dz and his project https://github.com/h4x0r-dz/Leaked-Credentials . This project is based on his regex
