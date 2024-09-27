@@ -79,7 +79,3 @@ Patrick Steinhoff - [LinkedIn](https://www.linkedin.com/in/patrick-steinhoff-168
 - URL scans are currently capped at 100,000 URLs due to performance and capacity considerations.
 - GET requests may take considerable time due to the trade-off between speed performance and DDoS prevention.
 - Credit goes to Bug Bounty Hunter h4x0r-dz and their project [Leaked-Credentials](https://github.com/h4x0r-dz/Leaked-Credentials), which this project's regex is based on.
-
-## License
-
-[Add license information here]
