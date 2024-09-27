@@ -1,70 +1,85 @@
 # credentialthreat
-**find leaked credentials and sensitive data (e.g. tokens, api keys, ...) based on URL, Subdomain & Javascript File Permutations**
 
-**Current Version 1.11**
+Find leaked credentials and sensitive data (e.g., tokens, API keys) based on URL, Subdomain & JavaScript File Permutations.
 
-# **Features**
-**Key Features**
+**Current Version:** 1.11
+
+## Features
+
+### Key Features
 - Subdomain Scan
-- (Internal) URL / Javascript File / Network File Scan
-- Multiprocessing based on cpu cores
-- DDOS Prevention Instruments (e.g. time delays)
-- Scan up to 100.000 URLs / Network Files based on a single domain
+- (Internal) URL / JavaScript File / Network File Scan
+- Multiprocessing based on CPU cores
+- DDoS Prevention Instruments (e.g., time delays)
+- Scan up to 100,000 URLs / Network Files based on a single domain
 
-**CSV Output Columns**
-- CSV File is created into "credentialthreat/data/output" folder
-- Base URL: URL with affected sensitive data candidate; e.g. https://www.agilecommunity.ottogroup.com/de/medien/newsroom/
-- Affected Network Resource from Base URL; e.g. https://www.agilecommunity.ottogroup.com/wLayout22/wGlobal/layout/scripts/juicer.js
-- Registered Domain of Base URL; e.g. ottogroup.com
-- Credential Sensitive Data Candidate; e.g. ('apikey', 'AIzaSyDjDleLPTuwqlLU9jKwAdw3LnWWl4TLO-c') <br>
+### CSV Output
+The CSV file is created in the `credentialthreat/data/output` folder with the following columns:
+- Base URL: URL with affected sensitive data candidate
+- Affected Network Resource from Base URL
+- Registered Domain of Base URL
+- Credential Sensitive Data Candidate
 
-**Example Screenshot: Illustration of csv file and scanned sensitive data candidates**
-![image](https://github.com/PAST2212/credentialthreat/assets/124390875/4c3dca5b-ff4b-4fbf-beef-7bf7f401e203)
+### Example Output
+![CSV Output Example](https://github.com/PAST2212/credentialthreat/assets/124390875/4c3dca5b-ff4b-4fbf-beef-7bf7f401e203)
 
-# **Instructions**
+## Installation
 
-**How to install:**
-- git clone https://github.com/PAST2212/credentialthreat.git
-- cd credentialthreat
-- pip install -r requirements.txt
+```bash
+git clone https://github.com/PAST2212/credentialthreat.git
+cd credentialthreat
+pip install -r requirements.txt
+```
 
-**How to run:** <br>
+## Usage
 
-- "python3 credentialthreat.py" <br>
+1. Add root domain(s) to scan in `credentialthreat/data/input/domains.txt` (one per line, including TLD).
+2. Run the script:
+   ```bash
+   python3 credentialthreat.py
+   ```
 
-**How to update:**
-- cd credentialthreat
-- git pull
-- In case of a Merge Error: Try "git reset --hard" before "git pull"
-  
-  ==> Make sure to make a backup of your userdata folder before update
+## Updating
 
-**Before the first run - How it Works:** 
-- Put your root domain(s) you want to scan into this TXT file "credentialthreat/data/input/domains.txt" line per line for scanning operations (with the TLD). "hackerone.com" is listed per default.
+```bash
+cd credentialthreat
+git pull
+```
 
-**Example Results:**
+If you encounter a merge error, try:
+```bash
+git reset --hard
+git pull
+```
 
-![Screenshot 2024-05-25 152518](https://github.com/PAST2212/credentialthreat/assets/124390875/88201216-622a-475e-8162-22bd811eacbf)
+**Note:** Make a backup of your userdata folder before updating.
 
-![Screenshot 2024-05-25 181006](https://github.com/PAST2212/credentialthreat/assets/124390875/c24536c5-c3ec-464f-a952-22a37aa89b4d)
+## Example Results
 
-![Screenshot 2024-05-25 150718](https://github.com/PAST2212/credentialthreat/assets/124390875/b99da01b-227c-4f87-88e9-60ea2e057be6)
+![Result Example 1](https://github.com/PAST2212/credentialthreat/assets/124390875/88201216-622a-475e-8162-22bd811eacbf)
 
+![Result Example 2](https://github.com/PAST2212/credentialthreat/assets/124390875/c24536c5-c3ec-464f-a952-22a37aa89b4d)
 
-# **Changelog**
-- Please see Changelog for Updates:
-- https://github.com/PAST2212/credentialthreat/blob/master/Changelog
+![Result Example 3](https://github.com/PAST2212/credentialthreat/assets/124390875/b99da01b-227c-4f87-88e9-60ea2e057be6)
 
-# **Notes**
+## Changelog
 
-**Author**
-- Patrick Steinhoff (https://www.linkedin.com/in/patrick-steinhoff-168892222/)
+For updates, please see the [Changelog](https://github.com/PAST2212/credentialthreat/blob/master/Changelog).
 
-**TO DO**
-- PEP 8 Compliance
-- Add new Regex
+## Notes
 
-**Additional**
-- URL Scan for sensitive data candidates are currently capped to 100.000 URLs due to performance, client/server capacity issues.
-- It can take a lot of time to make GET requests because of tradeoff relation between Speed Performance and DDOS Preventions.
-- Credits goes to Bug Bounty Hunter h4x0r-dz and his project https://github.com/h4x0r-dz/Leaked-Credentials . This project is based on his regex
+### Author
+Patrick Steinhoff - [LinkedIn](https://www.linkedin.com/in/patrick-steinhoff-168892222/)
+
+### To-Do
+- Implement PEP 8 compliance
+- Add new Regex patterns
+
+### Additional Information
+- URL scans are currently capped at 100,000 URLs due to performance and capacity considerations.
+- GET requests may take considerable time due to the trade-off between speed performance and DDoS prevention.
+- Credit goes to Bug Bounty Hunter h4x0r-dz and their project [Leaked-Credentials](https://github.com/h4x0r-dz/Leaked-Credentials), which this project's regex is based on.
+
+## License
+
+[Add license information here]
