@@ -1,7 +1,5 @@
 import time
 import http.cookies
-import asyncio
-import sys
 import multiprocessing
 import logging
 import math
@@ -21,6 +19,13 @@ from credentialthreat.recon.wayback import ScanerWaybackMachine
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 if __name__ == '__main__':
+
+    utils.configure_platform_settings()
+
+    # called directly inside the if __name__ == "__main__": block, because that block is specially recognized as the entry point for the parent process.
+    # Calling freeze_support() inside a function may not work as expected, because the frozen child process might not reach that function before it needs to initialize.
+    multiprocessing.freeze_support()
+
     http.cookies._is_legal_key = lambda _: True
 
     result_queue = multiprocessing.Queue()
@@ -30,8 +35,7 @@ if __name__ == '__main__':
     tld_extract_object = tldextract.TLDExtract(include_psl_private_domains=True)
     tld_extract_object('google.com')
 
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 
     FG, BT, FR, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Style.RESET_ALL
 
@@ -53,25 +57,24 @@ if __name__ == '__main__':
     logging.info(FR + f'\nStart Internal URL Scan' + S)
     urls_wayback = ScanerWaybackMachine().get_results(iterables=domains)
     results_wayback_normalized = {item for item in urls_wayback if tld_extract_object(item).registered_domain in domains}
-    # logging.info(f'{len(results_wayback_normalized)} Internal URLs were found for {domains} Domain(s) from Wayback Machine')
+    logging.info(f'{len(results_wayback_normalized)} Internal URLs were found for {domains} Domain(s) from Wayback Machine')
 
     start1 = time.perf_counter()
     logging.info(FR + f"\nStart Multiprocessing Internal URL Scan for {len(fqdn)} Full Qualified Domain Names on up to {number_processor} detected CPU Cores\n" + S)
 
     size_chunk_fqdn = math.ceil(len(fqdn) / number_processor)
-
     chunks_fqdns = utils.chunked_iterable_gen(fqdn, size_chunk_fqdn, cpu_units=number_processor)
+
+    total_urls = len(fqdn)
 
     process_pool_fqdns = []
 
     internal_links_whitelist: set[str] = set()
     internal_links_blacklist: set[str] = set()
 
-    total_urls = len(fqdn)
-
     with tqdm(total=total_urls, desc="Processing FQDNs") as pbar:
         for i, chunk in enumerate(chunks_fqdns):
-            process = multiprocessing.Process(target=ScanerInternalLinks().get_results, args=(chunk, domains, tld_extract_object, result_queue, progress_queue), name=f"ScanProcess-{i+1}")
+            process = multiprocessing.Process(target=ScanerInternalLinks().get_results, args=(chunk, tld_extract_object, result_queue, progress_queue), name=f"ScanProcess-{i+1}")
             logging.info(FR + f'\nProcessor Job {chunk[0] + 1} for Internal URL scan is starting for {len(chunk[1])} Full Qualified Domain Names\n' + S)
             process.start()
             process_pool_fqdns.append(process)
@@ -103,7 +106,7 @@ if __name__ == '__main__':
     fqdn_normalized = [item for item in fqdn if item not in internal_links_blacklist]
     internal_links_normalized = list(filter(lambda item: item is not None, list(internal_links)))
     internal_links_normalized = utils.remove_byte_content_urls(internal_links_normalized)
-    logging.info(f'{len(internal_links_normalized)} Internal URLs were found for {len(fqdn_normalized)} Normalized Fully Qualified Domain Names')
+    logging.info(f'\n{len(internal_links_normalized)} Internal URLs were found for {len(fqdn_normalized)} Normalized Fully Qualified Domain Names')
     logging.info(f'Example Internal Links: {internal_links_normalized[1:10]}')
     logging.info(FG + "End Internal URL Scan\n" + S)
 

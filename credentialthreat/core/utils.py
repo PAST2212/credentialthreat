@@ -2,6 +2,9 @@
 
 import random
 import re
+import sys
+import asyncio
+import multiprocessing
 from itertools import islice
 
 
@@ -132,6 +135,15 @@ def get_header() -> dict:
     }
 
     return headers
+
+
+# Function to configure cross-platform settings
+def configure_platform_settings():
+    if sys.platform.startswith('win'):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        multiprocessing.set_start_method('spawn', force=True)
+    else:
+        multiprocessing.set_start_method('fork', force=True)
 
 
 def chunked_iterable(iterable: list, chunk_size: int) -> list:

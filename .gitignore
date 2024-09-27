@@ -1,4 +1,4 @@
-test
+test/
 __pycache__
 .venv
 *.idea
@@ -6,3 +6,5 @@ __pycache__
 venv
 *.png
 .idea
+*csv
+domains.txt
