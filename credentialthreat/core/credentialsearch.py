@@ -11,6 +11,7 @@ from aiohttp.client_exceptions import ServerConnectionError, ClientResponseError
 from aiolimiter import AsyncLimiter
 from credentialthreat.core import utils
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,7 +103,7 @@ class ScanerCredentials:
         origin_url, script_url = url_tuple
         try:
             async with self.rate_limiter:
-                async with session.get(script_url, headers=header, allow_redirects=True, max_redirects=5, skip_auto_headers=['Cookie'], cookie_jar=None) as response:
+                async with session.get(script_url, headers=header, allow_redirects=True, max_redirects=5) as response:
                     data = await response.text('utf-8', 'ignore')
 
                     if not data:
@@ -152,21 +153,26 @@ class ScanerCredentials:
 
         all_results = []
         total_batches = (len(network_files) + self.batch_size - 1) // self.batch_size
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            for batch_num, i in enumerate(range(0, len(network_files), self.batch_size), 1):
-                batch = network_files[i:i + self.batch_size]
-                try:
-                    logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Network Urls" + S)
-                    results = await self._fetch_credentials(batch, header, session)
-                    all_results.extend(results)
-                    logger.info(FR + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Network Urls" + S)
-                    if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains with 50 batch_size)
-                        pause_time = min(len(batch) / 100, 3)
-                        await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
 
-                except Exception as e:
-                    logger.error(f"Batch {batch_num} failed: {str(e)}")
-                    continue
+        try:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                for batch_num, i in enumerate(range(0, len(network_files), self.batch_size), 1):
+                    batch = network_files[i:i + self.batch_size]
+                    try:
+                        logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Network Urls" + S)
+                        results = await self._fetch_credentials(batch, header, session)
+                        all_results.extend(results)
+                        logger.info(FR + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Network Urls" + S)
+                        if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains with 50 batch_size)
+                            pause_time = min(len(batch) / 100, 3)
+                            await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
+
+                    except Exception as e:
+                        logger.error(f"Batch {batch_num} failed: {str(e)}")
+                        continue
+
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            logger.info("\nOperation cancelled, cleaning up...")
 
         return all_results
 

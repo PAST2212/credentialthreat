@@ -19,6 +19,7 @@ from bs4 import XMLParsedAsHTMLWarning
 from tenacity import retry, stop_after_attempt, retry_if_exception_type, wait_exponential
 from credentialthreat.core import utils
 
+
 logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -56,7 +57,7 @@ class ScanerNetworkResources:
     async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, BeautifulSoup]:
         try:
             async with self.rate_limiter:
-                async with session.get(url, headers=header, allow_redirects=True, max_redirects=5, skip_auto_headers=['Cookie'], cookie_jar=None) as response:
+                async with session.get(url, headers=header, allow_redirects=True, max_redirects=5) as response:
                     content_type = response.headers.get('content-type', '').lower()
                     text = await response.text('utf-8', 'ignore')
 
@@ -170,21 +171,25 @@ class ScanerNetworkResources:
 
         all_results = []
         total_batches = (len(network_points) + self.batch_size - 1) // self.batch_size
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            for batch_num, i in enumerate(range(0, len(network_points), self.batch_size), 1):
-                batch = network_points[i:i + self.batch_size]
-                try:
-                    logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Internal Urls" + S)
-                    results = await self._get_network_sources(batch, domains_input, tld_extract, header, session)
-                    all_results.extend(results)
-                    logger.info(FG + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Internal Urls" + S)
-                    if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains/URLs with 50 batch_size)
-                        pause_time = min(len(batch) / 100, 3)
-                        await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
+        try:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                for batch_num, i in enumerate(range(0, len(network_points), self.batch_size), 1):
+                    batch = network_points[i:i + self.batch_size]
+                    try:
+                        logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Internal Urls" + S)
+                        results = await self._get_network_sources(batch, domains_input, tld_extract, header, session)
+                        all_results.extend(results)
+                        logger.info(FG + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Internal Urls" + S)
+                        if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains/URLs with 50 batch_size)
+                            pause_time = min(len(batch) / 100, 3)
+                            await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
 
-                except Exception as e:
-                    logger.error(f"Batch {batch_num} failed: {str(e)}")
-                    continue
+                    except Exception as e:
+                        logger.error(f"Batch {batch_num} failed: {str(e)}")
+                        continue
+
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            logger.info("\nOperation cancelled, cleaning up...")
 
         return all_results
 

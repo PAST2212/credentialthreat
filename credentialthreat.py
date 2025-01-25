@@ -18,6 +18,7 @@ from credentialthreat.core import utils
 from credentialthreat.recon.wayback import ScanerWaybackMachine
 from credentialthreat.core.utils import UrlPrioritizer
 
+
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
@@ -47,7 +48,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-if __name__ == '__main__':
+def main():
 
     FG, BT, FR, FY, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Fore.YELLOW, Style.RESET_ALL
 
@@ -107,6 +108,7 @@ if __name__ == '__main__':
                       f"\n├── {f"Optimal Chunk Size: {size_chunk_fqdn:,}" if size_chunk_fqdn <= len(fqdn) else f"Optimal Chunk Size: {len(fqdn)}"}"
                       f"\n├── Total Chunks: {total_chunks}"
                       f"\n└── CPU Cores: {num_processes}\n" + S)
+
     with mp.Pool(processes=num_processes) as pool:
         for chunk_result in pool.imap(worker, process_chunks):
             internal_urls, blacklist = chunk_result
@@ -147,6 +149,7 @@ if __name__ == '__main__':
                       f"\n├── {f"Optimal Chunk Size: {optimal_chunk_size:,}" if optimal_chunk_size <= len(host_names_scaled) else f"Optimal Chunk Size: {len(host_names_scaled)}"}"
                       f"\n├── Total Chunks: {total_chunks}"
                       f"\n└── CPU Cores: {num_processes}\n" + S)
+
     with mp.Pool(processes=num_processes) as pool:
         for chunk_result in pool.imap(worker, process_chunks):
             network_f_whitelist, network_f_blacklist = chunk_result
@@ -182,6 +185,7 @@ if __name__ == '__main__':
                       f"\n├── {f"Optimal Chunk Size: {optimal_chunk_size:,}" if optimal_chunk_size <= len(network_files_scaled) else f"Optimal Chunk Size: {len(network_files_scaled)}"}"
                       f"\n├── Total Chunks: {total_chunks}"
                       f"\n└── CPU Cores: {num_processes}\n" + S)
+
     with mp.Pool(processes=num_processes) as pool:
         for chunk_result in pool.imap(worker, process_chunks):
             found_leaks = chunk_result
@@ -197,3 +201,7 @@ if __name__ == '__main__':
     logging.info(FR + '\nStart Writing Results to .csv file in data/output folder' + S)
     ManageFiles.write_csv_result_file(iterables=leaks)
     print(FG + 'End Writing Results to .csv file in data/output folder\n' + S)
+
+
+if __name__ == '__main__':
+    main()

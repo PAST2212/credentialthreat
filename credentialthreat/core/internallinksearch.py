@@ -47,7 +47,7 @@ class ScanerInternalLinks:
     async def _get_request(self, url: str, header: dict, session: aiohttp.ClientSession) -> Union[BeautifulSoup, None]:
         try:
             async with self.rate_limiter:
-                async with session.get(url, headers=header, allow_redirects=True, max_redirects=5, skip_auto_headers=['Cookie'], cookie_jar=None) as response:
+                async with session.get(url, headers=header, allow_redirects=True, max_redirects=5) as response:
                     html = await response.text('utf-8', 'ignore')
                     soup = BeautifulSoup(html, 'html.parser')
                     return soup
@@ -132,21 +132,25 @@ class ScanerInternalLinks:
 
         all_results: set = set()
         total_batches = (len(fqdns) + self.batch_size - 1) // self.batch_size
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            for batch_num, i in enumerate(range(0, len(fqdns), self.batch_size), 1):
-                batch = fqdns[i:i + self.batch_size]
-                try:
-                    logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Full Qualified Domain Names" + S)
-                    results = await self._get_internal_links(batch, tld_extract, header, session)
-                    all_results.update(results)
-                    logger.info(FG + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Full Qualified Domain Names" + S)
-                    if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains/URLs with 50 batch_size)
-                        pause_time = min(len(batch) / 100, 3)
-                        await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
+        try:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                for batch_num, i in enumerate(range(0, len(fqdns), self.batch_size), 1):
+                    batch = fqdns[i:i + self.batch_size]
+                    try:
+                        logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Full Qualified Domain Names" + S)
+                        results = await self._get_internal_links(batch, tld_extract, header, session)
+                        all_results.update(results)
+                        logger.info(FG + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Full Qualified Domain Names" + S)
+                        if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains/URLs with 50 batch_size)
+                            pause_time = min(len(batch) / 100, 3)
+                            await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
 
-                except Exception as e:
-                    logger.error(f"Batch {batch_num} failed: {str(e)}")
-                    continue
+                    except Exception as e:
+                        logger.error(f"Batch {batch_num} failed: {str(e)}")
+                        continue
+
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            logger.info("\nOperation cancelled, cleaning up...")
 
         return all_results
 
