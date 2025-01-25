@@ -2,7 +2,7 @@
 
 Find leaked credentials and sensitive data (e.g., tokens, API keys) based on URL, Subdomain & JavaScript File Permutations.
 
-**Current Version:** 2.00
+**Current Version:** 2.01
 
 ## Features
 
