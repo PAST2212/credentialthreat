@@ -3,14 +3,17 @@
 import re
 import asyncio
 from urllib.parse import urljoin
-import multiprocessing
+from dataclasses import dataclass
 import logging
 import warnings
-from typing import List, Set, Tuple, Union
+from colorama import Fore, Style
+from typing import Union
 import tldextract
+import json
 import aiohttp
+from aiohttp.client_exceptions import ServerConnectionError, ServerTimeoutError, ServerDisconnectedError, ClientConnectorSSLError, InvalidURL, ClientResponseError, ClientPayloadError, ClientConnectionError, ClientOSError, ClientConnectorError, ClientProxyConnectionError
 from aiolimiter import AsyncLimiter
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, SoupStrainer
 from bs4 import MarkupResemblesLocatorWarning
 from bs4 import XMLParsedAsHTMLWarning
 from tenacity import retry, stop_after_attempt, retry_if_exception_type, wait_exponential
@@ -22,116 +25,171 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 
+@dataclass
+class ScrapNetworkUrls:
+    origin_url: str
+    script_url: str
+
+
 class ScanerNetworkResources:
-    def __init__(self) -> None:
-        self.pattern_bytes_files = re.compile(r"(?=:[^\S])?(?:https?://)?[\./]*[\w/\.]+\.(?:jpg|png|gif|jpeg|bmp|webp|woff2|woff|ico|svg|mp3|mp4|mpeg|mpg|avi|zip|rar|tar|gz|pdf|ttf|exe|xml|app)", re.IGNORECASE)
-        self.queue = asyncio.Queue()
-        self.results: Set[Tuple[str, str]] = set()
-        self.blacklist: Set[str] = set()
-        self.sem = asyncio.Semaphore(100)
-        self.rate_limiter = AsyncLimiter(100, 1)
+    def __init__(self, max_concurrent_requests: int = 25, batch_size: int = 50) -> None:
+        self.pattern_bytes_files = re.compile(
+            r"(?=:\s)?(?:https?://)?[./]*[\w/.]+'\.(?:jpg|png|gif|jpeg|bmp|webp|woff2|"
+            r"woff|ico|svg|mp3|mp4|mpeg|mpg|avi|zip|rar|tar|gz|pdf|ttf|exe|xml|app)",
+            re.IGNORECASE
+        )
+        self.blacklist: set[str] = set()
+        self.max_concurrent_requests = max_concurrent_requests
+        self.batch_size = batch_size
+        self.rate_limiter = AsyncLimiter(max_concurrent_requests, 1)
+        self.strainer = SoupStrainer(['script', 'link'])
 
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=(
-            retry_if_exception_type(aiohttp.ClientError) |
-            retry_if_exception_type(asyncio.TimeoutError) |
-            retry_if_exception_type(ConnectionError) |
-            retry_if_exception_type(IOError) |
-            retry_if_exception_type(aiohttp.client_exceptions.ServerDisconnectedError) |
-            retry_if_exception_type(aiohttp.client_exceptions.ServerConnectionError) |
-            retry_if_exception_type(aiohttp.client_exceptions.ServerTimeoutError) |
-            retry_if_exception_type(aiohttp.client_exceptions.ClientPayloadError)
+                retry_if_exception_type(ClientResponseError) |
+                retry_if_exception_type(asyncio.TimeoutError) |
+                retry_if_exception_type(ServerConnectionError)
         )
     )
-    async def _get_request(self, url: str, session: aiohttp.ClientSession) -> BeautifulSoup:
-        async with self.sem:
-            await self.rate_limiter.acquire()
-            try:
-                async with session.get(url, headers=utils.get_header(), allow_redirects=True, max_redirects=5) as response:
-                    response_transform = await response.text('utf-8', 'ignore')
-                    soup = BeautifulSoup(response_transform, 'lxml')
-                    return soup
+    async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, BeautifulSoup]:
+        try:
+            async with self.rate_limiter:
+                async with session.get(url, headers=header, allow_redirects=True, max_redirects=5, skip_auto_headers=['Cookie'], cookie_jar=None) as response:
+                    content_type = response.headers.get('content-type', '').lower()
+                    text = await response.text('utf-8', 'ignore')
 
-            # in case for subdomains without https:// protocoll, SSL ERRORS, Malformed Fetched URLS
-            except (aiohttp.client_exceptions.ClientConnectorError, aiohttp.client_exceptions.ClientConnectorSSLError,
-                    aiohttp.ClientOSError, aiohttp.client_exceptions.InvalidURL,
-                    aiohttp.client_exceptions.ServerDisconnectedError, aiohttp.client_exceptions.ClientPayloadError, aiohttp.client_exceptions.ServerTimeoutError):
-                self.blacklist.add(url)
+                    # Handle JSON responses differently; WordPress JSON API responses
+                    if 'application/json' in content_type:
+                        try:
+                            # Parse JSON and convert to HTML for BeautifulSoup
+                            json_data = json.loads(text)
+                            # Create a simple HTML wrapper for JSON content
+                            html_content = f"<html><body>{json.dumps(json_data)}</body></html>"
+                            return BeautifulSoup(html_content, 'html.parser')
+                        except json.JSONDecodeError:
+                            pass
 
-            except (aiohttp.ClientConnectorError, aiohttp.ClientOSError):
-                pass
+                    return BeautifulSoup(text, 'html.parser')
 
-            except Exception as e:
-                logger.error(f"Exception: {str(type(e))}. Unsuccessful Connection Attempt to URL {url}. Exception Message: {str(e)}")
-                self.blacklist.add(url)
-
-    async def _fetch_network_sources(self, url: str, domains_input: List[str], tld_extract: tldextract.tldextract.TLDExtract, session: aiohttp.ClientSession) -> None:
-
-        soup = await self._get_request(url=url, session=session)
-
-        if not soup:
+        except (ClientConnectionError, ClientOSError, ClientPayloadError, ClientConnectorError, ClientProxyConnectionError, InvalidURL, ClientConnectorSSLError, ServerDisconnectedError, ServerTimeoutError):
+            self.blacklist.add(url)
             return None
 
-        for script in soup.find_all("script"):
-            script_item = self.extract_src(script=script, url=url, domains_input=domains_input, tld_extract=tld_extract)
-            if script_item:
-                self.results.add(script_item)
-
-        for css in soup.find_all("link"):
-            src_item = self.extract_href(css=css, url=url, domains_input=domains_input, tld_extract=tld_extract)
-            if src_item:
-                self.results.add(src_item)
-
-        self.results.add((url, url))
-
-    def extract_src(self, script, url: str, domains_input: List[str], tld_extract: tldextract.tldextract.TLDExtract) -> Union[Tuple[str, str], None]:
-        if script.attrs.get("src"):
-            script_url = urljoin(url, script.attrs.get("src"))
-            if self.pattern_bytes_files.search(script_url) is None:
-                for keyword in domains_input:
-                    if tld_extract(keyword).domain in tld_extract(script_url).fqdn:
-                        return url, script_url
-
-        return None
-
-    def extract_href(self, css, url: str, domains_input: List[str], tld_extract: tldextract.tldextract.TLDExtract) -> Union[Tuple[str, str], None]:
-        if css.attrs.get("href"):
-            css_url = urljoin(url, css.attrs.get("href"))
-            if self.pattern_bytes_files.search(css_url) is None:
-                for keyword in domains_input:
-                    if tld_extract(keyword).domain in tld_extract(css_url).fqdn:
-                        return url, css_url
-
-        return None
+        except Exception as e:
+            logger.error(f"Exception: {str(type(e))}. Unsuccessful Connection Attempt to URL {url}. Exception Message: {str(e)}")
+            self.blacklist.add(url)
+            return None
 
     @staticmethod
-    def _chunked_tasks(tasks, batch_size):
-        for i in range(0, len(tasks), batch_size):
-            yield tasks[i:i + batch_size]
-
-    async def _tasks_network_sources(self, network_points: List[str], domains_input: List[str], tld_extract: tldextract.tldextract.TLDExtract, progress_queue: multiprocessing.Queue) -> None:
-        connector = aiohttp.TCPConnector(ssl=False, limit_per_host=10, force_close=True,  enable_cleanup_closed=True)
-        timeout = aiohttp.ClientTimeout(total=600, sock_read=30, sock_connect=30)
-
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            tasks = [self._fetch_network_sources(url, domains_input, tld_extract, session) for url in network_points]
-            for task_batch in self._chunked_tasks(tasks, 100):  # Process in batches of 100
-                results = await asyncio.gather(*task_batch, return_exceptions=True)
-                progress_queue.put(len(task_batch))
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error(f"Error in task: {str(result)}")
-
-    def get_results(self, iterables: list, domains_input: list, tld_extract: tldextract.tldextract.TLDExtract, result_queue: multiprocessing.Queue, progress_queue: multiprocessing.Queue) -> None:
-        logging.basicConfig(level=logging.WARNING, format='%(message)s')
-        value = iterables[1]
+    def _clean_url(url: str) -> str:
+        """ handle double-escaped URLs with backslashes """
         try:
-            asyncio.run(self._tasks_network_sources(value, domains_input, tld_extract, progress_queue))
-        except Exception as e:
-            logger.error(f"Error in get_results: {str(e)}")
+            # Remove JSON escaping
+            url = url.replace('\\"', '"').replace('\\/', '/')
 
-        results = set(filter(lambda item: item is not None, self.results))
-        results_normalized = results | self.blacklist
-        result_queue.put((len(value), results_normalized))
+            # Remove unnecessary escaping
+            url = re.sub(r'\\+', '/', url)
+
+            # Fix double slashes (except in protocol)
+            url = re.sub(r'(?<!:)/{2,}', '/', url)
+
+            # Remove any query params that look like JSON or escaped content
+            url = re.sub(r'\?.*=\\.*', '', url)
+
+            return url.strip('"\'')
+        except Exception as e:
+            logger.error(f"Error cleaning URL {url}: {str(e)}")
+            return url
+
+    def _extract_url(self, element: BeautifulSoup, attr: str, base_url: str, domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> list[ScrapNetworkUrls]:
+        results = []
+        if url := element.attrs.get(attr):
+            url = self._clean_url(url)
+            full_url = urljoin(base_url, url)
+            if not self.pattern_bytes_files.search(full_url):
+                for keyword in domains_input:
+                    if tld_extract(keyword).domain in tld_extract(full_url).fqdn:
+                        results.append(ScrapNetworkUrls(base_url, full_url))
+        return results
+
+    async def _fetch_network_sources(self, url: str, domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract, header, session: aiohttp.ClientSession) -> list[ScrapNetworkUrls]:
+        results = []
+        try:
+            url = self._clean_url(url)
+            if soup := await self._get_request(url, header, session):
+                results.append(ScrapNetworkUrls(url, url))
+
+                for script in soup.find_all("script"):
+                    results.extend(self._extract_url(script, 'src', url, domains_input, tld_extract))
+                    results.extend(self._extract_url(script, 'data-src', url, domains_input, tld_extract))
+
+                for resource in soup.find_all(['link', 'iframe', 'frame', 'embed', 'object']):
+                    for attr in ['href', 'src', 'data', 'data-src']:
+                        results.extend(self._extract_url(resource, attr, url, domains_input, tld_extract))
+
+                for script in soup.find_all("script", src=None):  # inline scripts
+                    if script_text := script.string:
+                        # Look for dynamic imports
+                        import_patterns = [
+                            r'import\s+[\'"]([^\'"]+)[\'"]',
+                            r'require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
+                            r'importScripts\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
+                            r'loadScript\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)'
+                        ]
+                        for pattern in import_patterns:
+                            if matches := re.finditer(pattern, script_text):
+                                for match in matches:
+                                    imported_url = urljoin(url, match.group(1))
+                                    if not self.pattern_bytes_files.search(imported_url):
+                                        results.append(ScrapNetworkUrls(url, imported_url))
+
+        except:
+            self.blacklist.add(url)
+
+        return results
+
+    async def _get_network_sources(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract, header, session: aiohttp.ClientSession) -> list[ScrapNetworkUrls]:
+        tasks = [self._fetch_network_sources(url, domains_input, tld_extract, header, session) for url in network_points]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [r for sublist in results if isinstance(sublist, list) for r in sublist]
+
+    async def process_network_sources(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> list[ScrapNetworkUrls]:
+        FG, BT, FR, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Style.RESET_ALL
+        connector = aiohttp.TCPConnector(
+            ssl=False,
+            limit_per_host=self.max_concurrent_requests,
+            force_close=False,
+            keepalive_timeout=300,
+            enable_cleanup_closed=True,
+            ttl_dns_cache=600
+        )
+        timeout = aiohttp.ClientTimeout(total=45, sock_read=30, sock_connect=5)
+        header = utils.get_header()
+
+        all_results = []
+        total_batches = (len(network_points) + self.batch_size - 1) // self.batch_size
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            for batch_num, i in enumerate(range(0, len(network_points), self.batch_size), 1):
+                batch = network_points[i:i + self.batch_size]
+                try:
+                    logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Internal Urls" + S)
+                    results = await self._get_network_sources(batch, domains_input, tld_extract, header, session)
+                    all_results.extend(results)
+                    logger.info(FG + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Internal Urls" + S)
+                    if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains/URLs with 50 batch_size)
+                        pause_time = min(len(batch) / 100, 3)
+                        await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
+
+                except Exception as e:
+                    logger.error(f"Batch {batch_num} failed: {str(e)}")
+                    continue
+
+        return all_results
+
+    async def get_results(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[list[ScrapNetworkUrls], set[str]]:
+        logging.basicConfig(level=logging.INFO, format='%(message)s')
+        scraper = ScanerNetworkResources()
+        results = await scraper.process_network_sources(network_points=network_points, domains_input=domains_input, tld_extract=tld_extract)
+        return results, self.blacklist

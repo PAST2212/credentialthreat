@@ -45,9 +45,9 @@ class ManageFiles:
                 writer.writerow(header)
 
     @staticmethod
-    def write_csv_result_file(iterables: list) -> None:
+    def write_csv_result_file(iterables: list[tuple]) -> None:
         console_file_path = f'{OUTPUT_DIRECORY}/Credential_Leak_Candidates_{datetime.date.today()}.csv'
         with open(console_file_path, mode='a', newline='') as f:
             writer = csv.writer(f, delimiter=';')
-            for k in iterables:
-                writer.writerow([k[0], k[1], tldextract.extract(k[0], include_psl_private_domains=True).registered_domain, *k[2]])
+            for leak_tuple in iterables:
+                writer.writerow([leak_tuple[0], leak_tuple[1], tldextract.extract(leak_tuple[0], include_psl_private_domains=True).registered_domain, *leak_tuple[2]])

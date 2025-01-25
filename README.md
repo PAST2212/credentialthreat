@@ -2,17 +2,30 @@
 
 Find leaked credentials and sensitive data (e.g., tokens, API keys) based on URL, Subdomain & JavaScript File Permutations.
 
-**Current Version:** 1.11
+**Current Version:** 2.00
 
 ## Features
 
 ### Key Features
 - Subdomain Scan
-- (Internal) URL / JavaScript File / Network File Scan
+- Internal URL Discovery
+- Network Resource Detection (JavaScript, Configuration Files)
+- Enhanced Credential Pattern Detection
+- Smart URL Prioritization
 - Multiprocessing based on CPU cores
 - DDoS Prevention Instruments (e.g., time delays)
-- Scan up to 100,000 URLs / Network Files based on a single domain
+- Configurable URL Scan Limit (default: 100,000)
 
+### Scanning Strategy
+- **URL Prioritization**: URLs are prioritized based on their likelihood of containing sensitive data
+- **Pattern Categories**:
+  - High-Risk Patterns (API keys, tokens, passwords)
+  - Cloud Service Credentials
+  - Database Connection Strings
+  - Authentication Tokens
+  - Infrastructure Secrets
+
+   
 ### CSV Output
 The CSV file is created in the `credentialthreat/data/output` folder with the following columns:
 - Base URL: URL with affected sensitive data candidate
@@ -26,18 +39,25 @@ The CSV file is created in the `credentialthreat/data/output` folder with the fo
 ## Installation
 
 ```bash
-git clone https://github.com/PAST2212/credentialthreat.git
+git clone https://github.com/PAST2212/credentialthreat
 cd credentialthreat
 pip install -r requirements.txt
 ```
 
 ## Usage
 
-1. Add root domain(s) to scan in `credentialthreat/data/input/domains.txt` (one per line, including TLD).
-2. Run the script:
-   ```bash
-   python3 credentialthreat.py
-   ```
+Basic usage (default setting):
+```bash
+python3 credentialthreat.py
+```
+
+Advanced usage (example command):
+```bash
+python3 credentialthreat.py --limit 200000
+```
+
+Options:
+- `--limit`: Maximum number of URLs to be scanned (default: 100000)
 
 ## Updating
 
@@ -52,7 +72,9 @@ git reset --hard
 git pull
 ```
 
-**Note:** Make a backup of your userdata folder before updating.
+## Configuration
+
+1. Add domain name to `credentialthreat/data/input/domains.txt`
 
 ## Example Results
 
@@ -71,11 +93,5 @@ For updates, please see the [Changelog](https://github.com/PAST2212/credentialth
 ### Author
 Patrick Steinhoff - [LinkedIn](https://www.linkedin.com/in/patrick-steinhoff-168892222/)
 
-### To-Do
-- Implement PEP 8 compliance
-- Add new Regex patterns
-
 ### Additional Information
-- URL scans are currently capped at 100,000 URLs due to performance and capacity considerations.
-- GET requests may take considerable time due to the trade-off between speed performance and DDoS prevention.
-- Credit goes to Bug Bounty Hunter h4x0r-dz and their project [Leaked-Credentials](https://github.com/h4x0r-dz/Leaked-Credentials), which this project's regex is based on.
+- Part of credential patterns are based on Bug Bounty Hunter h4x0r-dz project: [Leaked-Credentials](https://github.com/h4x0r-dz/Leaked-Credentials)

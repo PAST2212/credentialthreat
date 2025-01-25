@@ -1,3 +1,9 @@
+v 2.00 (25.01.2025)
+- bug fixes
+- add more credential patterns
+- add url limit (--limit) as an argument
+- smarter batch / parallel processing operations
+
 v 1.11 (27.09.2024)
 - Bug fixing
 - Further increase in Stability and Performance
