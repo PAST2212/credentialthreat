@@ -29,7 +29,7 @@ Always go through `discover -s tests`. `test_rule_benchmark.py` imports `credent
 Stages 2–4 share one pattern:
 
 - The parent deals the work round-robin into one chunk per worker with `utils.plan_chunks` and runs the chunks on a `multiprocessing` pool from `interrupt_handler.create_pool`. A chunk ends with its slowest request, so more chunks per worker would add idle tails. A real scan showed this: with four chunks per worker, each worker spent over half its time with only one or two requests in flight.
-- Because every worker works on every host at once, the workers share one per-host connection budget: `utils.host_connections_per_worker` hands each worker an equal share of 25, at least two. Workers pass it to the scanners' `host_connections`. Without the budget, five workers reached 61 parallel requests on one real host and lost 80 resources to connect timeouts.
+- Because every worker works on every host at once, the workers share one per-host connection budget: `utils.host_connections_per_worker` hands each worker an equal share of 25, at least two. Workers pass it to the scanners' `host_connections`. Against one real host, five workers without the budget lost 80 resources to connect timeouts. With it, they lost 12.
 - Each chunk goes to a module-level `process_chunks_for_*` function, which calls `asyncio.run` on a scanner class constructed with `scope=domains`. Workers return their results plus a dict of request outcomes. The parent sums the outcomes and logs one `... requests: ok=N, skipped=M (...)` line per stage.
 - Inside a worker, `AsyncCancellationManager.run_window` keeps `window_size` requests in flight (a sliding window, not batches), so one slow response never holds back the others.
 - The parent reads results through `GracefulKiller.pool_results`, which converts SIGINT/SIGTERM into `ScanInterrupted`.
@@ -57,7 +57,10 @@ Scanners must not open requests any other way.
 
 Links and resource references are resolved with `urljoin` against the final page URL. `website.canonical_url` then reduces them to one spelling: http(s) only, no fragment or userinfo, and `/` for an empty path. `website.is_binary_url` drops binary file extensions. The CLI sorts the canonical page list before prioritizing it, so a URL limit is reproducible.
 
-Scanner modules import `fetch` and `website`, never `utils`. `utils` imports `networksearch`, so the reverse import would bring back a circular import that a test checks.
+Import direction matters, because a test checks that each scanner module imports in a fresh interpreter:
+
+- Scanner modules import `fetch`, `website` and `interrupt_handler`, never `utils`. `utils` imports `networksearch`, so the reverse import would bring back a circular import.
+- `networksearch` also imports `credentialsearch` for the matcher, so `credentialsearch` must not import `networksearch`.
 
 Exit codes are:
 
@@ -76,6 +79,7 @@ A website-discovery provider subclasses `SubdomainProvider` in `core/discovery.p
 - Raise `UnexpectedFormat` for a response the provider does not recognize, even with HTTP 200. Do not return an empty set for it.
 - Call `require_ok` for HTTP status checks.
 - `observe` turns each query into a `QueryResult` in one of four states: `hits`, `empty` (a confirmed zero), `filtered` or `error`. The summary log and the exit code depend on those states.
+- `SubdomainProvider._query` repeats a query once when it fails with an HTTP 5xx status, after the class's `retry_pause`. That pause is 15 s for crt.sh and 5 s for RapidDNS, which keeps the retry within their published per-minute limits. Tests patch `asyncio.sleep` to skip the pause.
 
 `recon/dnsdumpster.py` and `recon/subdomaincenter.py` are legacy and not registered. Only a diagnostics test still imports them.
 
@@ -86,14 +90,14 @@ Rules live in `ScanerCredentials.__init__`:
 - `credential_pattern` matches a field name, an assignment operator and a quoted value.
 - `additional_patterns` holds the format-specific rules: `jwt`, `private_key` and `aws_keys`.
 
-Matches at the same span are merged into a single label such as `api_key + aws_keys`. The worker replaces each value with `[REDACTED]` before returning it.
+`ScanerCredentials._findings` applies them. The page stage reuses it through `ScanerNetworkResources.matcher`, so a rule change affects pages and resources alike. Matches at the same span are merged into a single label such as `api_key + aws_keys`. The worker replaces each value with `[REDACTED]` before returning it.
 
 `tests/measure_rules.py` refuses to run when `RULES` in `tests/credential_corpus.py` differs from the scanner's rule set. Adding or renaming a rule therefore needs a matching corpus update. If the benchmark numbers change, update `reports/website-scan-review/README.md`.
 
 ## Invariants the tests enforce
 
 - **Destinations.** Every HTTP session uses `PublicDestinationConnector` from `core/website.py`. It rejects the whole DNS answer if any address is not public unicast.
-- **Redirects.** Website fetches use `allow_redirects=False` and skip any 3xx response without reading the body.
+- **Redirects.** Website fetches use `allow_redirects=False` and never read a 3xx body. `fetch_text` follows a redirect itself, and only when the target is inside the scope. An out-of-scope target receives zero requests, and so does any target when no scope is set.
 - **Scope.** Scope checks go through `host_in_scope` and `url_in_scope`. A configured entry covers that host and its subdomains only.
 - **Domain parsing.** Use the shared `SUFFIXES` from `core/website.py` for registered-domain checks. It is the bundled public suffix list, including private suffixes, and never fetches the list over the network. Do not construct a new `TLDExtract`.
 - **No sensitive output.** Logs, console output and CSV never contain matched values, full URLs, paths, queries or target hostnames.
