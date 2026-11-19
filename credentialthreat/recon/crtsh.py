@@ -1,58 +1,30 @@
 #!/usr/bin/env python3
 
-import asyncio
 import json
+
 import aiohttp
+from credentialthreat.core.discovery import SubdomainProvider, UnexpectedFormat, require_ok
+from credentialthreat.core.website import host_in_scope
 
 
-class ScanerCrtsh:
-    def __init__(self) -> None:
-        self.results: set[tuple[str, str]] = set()
+class ScanerCrtsh(SubdomainProvider):
+    name = "crt.sh"
 
     @staticmethod
-    async def _scrape_subdomains(session: aiohttp.ClientSession, domain: str):
-        params = {
-            'q': f'%.{domain}',
-            'output': 'json'
-        }
-
-        try:
-            async with session.get('https://crt.sh/', params=params) as response:
-                if response.status == 200:
-                    data = await response.text()
-                    certificates = json.loads(data)
-
-                    subdomains = set()
-                    for cert in certificates:
-                        for subdomain in cert['name_value'].split('\n'):
-                            # Skip email addresses
-                            if '@' in subdomain:
-                                continue
-
-                            subdomain = subdomain.lower().replace('*.', '')
-                            if subdomain:
-                                subdomains.add(subdomain)
-
-                    return subdomains
-                else:
-                    print(f"Crt.sh returned status {response.status} for {domain}")
-
-        except asyncio.TimeoutError:
-            print(f"Timeout scanning {domain} on crt.sh")
-        except json.JSONDecodeError:
-            print(f"Invalid JSON response from crt.sh for {domain}")
-        except (aiohttp.ClientError, aiohttp.ServerConnectionError) as e:
-            print(f"Connection error scanning {domain} on crt.sh: {str(e)}")
-        except Exception as e:
-            print(f"Unexpected error scanning {domain} on crt.sh: {str(e)}")
-
-        return set()
-
-    async def get_results(self, domains: list, session: aiohttp.ClientSession):
-        for domain in domains:
-            try:
-                subdomains = await self._scrape_subdomains(session, domain)
-                self.results.update(subdomains)
-            except Exception as e:
-                print(f"Failed to scan {domain} on crt.sh: {str(e)}")
-        return self.results
+    async def _scrape_subdomains(session: aiohttp.ClientSession, domain: str) -> tuple[int, set[str]]:
+        params = {"q": f"%.{domain}", "output": "json"}
+        async with session.get("https://crt.sh/", params=params) as response:
+            require_ok(response.status)
+            certificates = json.loads(await response.text())
+        if not isinstance(certificates, list):
+            raise UnexpectedFormat
+        names = set()
+        for certificate in certificates:
+            names_field = certificate.get("name_value") if isinstance(certificate, dict) else None
+            if not isinstance(names_field, str) or not names_field.strip():
+                raise UnexpectedFormat
+            for entry in names_field.splitlines():
+                host = entry.lower().removeprefix("*.")
+                if host_in_scope(host, [domain]):
+                    names.add(host)
+        return len(certificates), names

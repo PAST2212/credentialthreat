@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 import asyncio
-import json
 from bs4 import BeautifulSoup
 import aiohttp
 from aiolimiter import AsyncLimiter
 from credentialthreat.core import utils
+from credentialthreat.core.diagnostics import log_discovery_error
 
 
 class ScanerDnsDumpster:
@@ -40,14 +40,8 @@ class ScanerDnsDumpster:
                                 if subdomain_trans != '':
                                     self.results.add(subdomain_trans)
 
-        except (asyncio.TimeoutError, TypeError, json.decoder.JSONDecodeError) as e:
-            print('Subdomain Scan error occurred in dnsdumpster: ', e)
-
-        except aiohttp.ClientConnectorError as e:
-            print('Server Connection Error via dnsdumpster Subdomain Scan: ', e)
-
         except Exception as e:
-            print('Other Error occured with dnsdumpster Subdomain Scan: ', e)
+            log_discovery_error("DNSDumpster request", e)
 
     async def tasks_rapiddns(self, fuzzy_results: list, session: aiohttp.ClientSession):
         rate_limit = AsyncLimiter(1, 10)

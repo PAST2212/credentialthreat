@@ -15,6 +15,7 @@ from aiohttp.client_exceptions import ServerConnectionError, ClientResponseError
 import tldextract
 from tenacity import retry, stop_after_attempt, retry_if_exception_type, wait_exponential
 from credentialthreat.core import utils
+from credentialthreat.core.website import PublicDestinationConnector
 from aiolimiter import AsyncLimiter
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,9 @@ class ScanerInternalLinks:
     async def _get_request(self, url: str, header: dict, session: aiohttp.ClientSession) -> Union[BeautifulSoup, None]:
         try:
             async with self.rate_limiter:
-                async with session.get(url, headers=header, allow_redirects=True, max_redirects=5) as response:
+                async with session.get(url, headers=header, allow_redirects=False) as response:
+                    if 300 <= response.status < 400:
+                        return None
                     html = await response.text('utf-8', 'ignore')
                     soup = BeautifulSoup(html, 'html.parser')
                     return soup
@@ -58,7 +61,7 @@ class ScanerInternalLinks:
             return None
 
         except Exception as e:
-            logger.error(f"Exception: {str(type(e))}. Unsuccessful Connection Attempt to URL {url}. Exception Message: {str(e)}")
+            logger.error("Internal link request failed (%s)", type(e).__name__)
             self.blacklist.add(url)
             return None
 
@@ -107,7 +110,7 @@ class ScanerInternalLinks:
                         if processed_link := self._process_link(href, domain, tld_extract):
                             results.add(processed_link)
         except Exception as e:
-            logger.error(f"Error processing {url}: {str(e)}")
+            logger.error("Internal link processing failed (%s)", type(e).__name__)
             self.blacklist.add(url)
 
         return results
@@ -119,8 +122,8 @@ class ScanerInternalLinks:
 
     async def process_internal_links(self, fqdns: list[str], tld_extract: tldextract.tldextract.TLDExtract):
         FG, BT, FR, FY, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Fore.YELLOW, Style.RESET_ALL
-        connector = aiohttp.TCPConnector(
-            ssl=False,
+        connector = PublicDestinationConnector(
+            ssl=True,
             limit_per_host=self.max_concurrent_requests,
             force_close=False,
             keepalive_timeout=300,
@@ -146,7 +149,7 @@ class ScanerInternalLinks:
                             await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
 
                     except Exception as e:
-                        logger.error(f"Batch {batch_num} failed: {str(e)}")
+                        logger.error("Batch %d failed (%s)", batch_num, type(e).__name__)
                         continue
 
         except (asyncio.CancelledError, KeyboardInterrupt):

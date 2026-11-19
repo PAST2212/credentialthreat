@@ -1,0 +1,1 @@
+# Local configuration belongs in domains.txt. Use one authorized domain per line.

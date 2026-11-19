@@ -10,6 +10,8 @@ import aiohttp
 from aiohttp.client_exceptions import ServerConnectionError, ClientResponseError, ClientPayloadError, ClientConnectionError, ClientOSError, ClientConnectorError, ClientProxyConnectionError
 from aiolimiter import AsyncLimiter
 from credentialthreat.core import utils
+from credentialthreat.core.interrupt_handler import AsyncCancellationManager
+from credentialthreat.core.website import PublicDestinationConnector, report_origin
 
 
 logger = logging.getLogger(__name__)
@@ -23,7 +25,7 @@ class ScanerCredentials:
             r"access_key|access_token|admin_pass|admin_user|algolia_admin_key|algolia_api_key|"
             r"alias_pass|alicloud_access_key|amazon_secret_access_key|amazonaws|ansible_vault_password|"
             r"aos_key|api_key|api_key_secret|api_key_sid|api_secret|api\.googlemaps AIza|apidocs|"
-            r"apikey|apiSecret|app_debug|app_id|app_key|app_log_level|app_secret|appkey|appkeysecret|"
+            r"apikey|apiSecret|app_id|app_key|app_secret|appkey|appkeysecret|"
             r"application_key|appsecret|appspot|auth_token|authorizationToken|authsecret|aws_access|"
             r"aws_access_key_id|aws_bucket|aws_key|aws_secret|aws_secret_key|aws_token|AWSSecretKey|"
             r"b2_app_key|bashrc password|bintray_apikey|bintray_gpg_password|bintray_key|bintraykey|"
@@ -72,22 +74,24 @@ class ScanerCredentials:
 
         # Construct the full pattern
         self.credential_pattern = (
-            r"((" + base_pattern + r")[a-z0-9_ .\-,]{0,25})" +  # Key names and separators
-            r"(=|>|:=|\|\|:|<=|=>|:|->|\+=|\-=|\*=|\/=|%=|\^=|&=|\|=|==|\+=|<<=|>>=|=>|\?=|\?\?=)" +  # Operators
+            r"(?P<label>" + base_pattern + r")[a-z0-9_ .\-,]{0,25}" +  # Key names and separators
+            r"(?:=|>|:=|\|\|:|<=|=>|:|->|\+=|\-=|\*=|\/=|%=|\^=|&=|\|=|==|\+=|<<=|>>=|=>|\?=|\?\?=)" +  # Operators
             r"\s*" +  # Optional whitespace
-            r"['\"]([0-9a-zA-Z\-_=+/]{8,128})['\"]"  # Value pattern
+            r"(?P<quote>['\"])(?P<value>[0-9a-zA-Z\-_=+/]{8,128})(?P=quote)"
         )
 
         # Add additional specific patterns for special cases
         self.additional_patterns = {
             'jwt': r'eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*',
-            'private_key': r'-----BEGIN (?:RSA )?PRIVATE KEY-----[A-Za-z0-9\s/+=]+-----END (?:RSA )?PRIVATE KEY-----',
+            'private_key': (r'-----BEGIN (?P<kind>(?:RSA )?PRIVATE KEY)-----'
+                            r'[A-Za-z0-9\s/+=]+-----END (?P=kind)-----'),
             'aws_keys': r'AKIA[0-9A-Z]{16}'
         }
 
         self.max_concurrent_requests = max_concurrent_requests
         self.batch_size = batch_size
         self.rate_limiter = AsyncLimiter(max_concurrent_requests, 1)
+        self.cancellation_manager = AsyncCancellationManager()
 
     @retry(
         stop=stop_after_attempt(3),
@@ -103,25 +107,26 @@ class ScanerCredentials:
         origin_url, script_url = url_tuple
         try:
             async with self.rate_limiter:
-                async with session.get(script_url, headers=header, allow_redirects=True, max_redirects=5) as response:
+                async with session.get(script_url, headers=header, allow_redirects=False) as response:
+                    if 300 <= response.status < 400:
+                        return None
                     data = await response.text('utf-8', 'ignore')
 
                     if not data:
                         return None
 
-                    leaked_global = re.findall(self.credential_pattern, data, flags=re.IGNORECASE | re.MULTILINE)
-
+                    labels_by_span: dict[tuple[int, int], list[str]] = {}
+                    for match in re.finditer(self.credential_pattern, data, flags=re.IGNORECASE | re.MULTILINE):
+                        labels_by_span[match.span("value")] = [match["label"].lower()]
                     for pattern_name, pattern in self.additional_patterns.items():
-                        additional_matches = re.findall(pattern, data)
-                        for match in additional_matches:
-                            leaked_global.append((pattern_name, match))
-
-                    if not leaked_global:
+                        for match in re.finditer(pattern, data):
+                            labels = labels_by_span.setdefault(match.span(), [])
+                            if pattern_name not in labels:
+                                labels.append(pattern_name)
+                    if not labels_by_span:
                         return None
-
-                    leaked_global = [(item[-3].lower(), item[-1]) if len(item) >= 3 else (item[-2].lower(), item[-1]) for item in leaked_global]
-
-                    return origin_url, script_url, leaked_global
+                    findings = [(" + ".join(labels), "[REDACTED]") for labels in labels_by_span.values()]
+                    return report_origin(origin_url), report_origin(script_url), findings
 
         except (ClientResponseError, asyncio.TimeoutError, ServerConnectionError, ClientPayloadError):
             raise
@@ -130,18 +135,18 @@ class ScanerCredentials:
             return None
 
         except Exception as e:
-            logger.error(f"Unexpected error for {script_url}: {str(e)}")
+            logger.error("Credential request failed (%s)", type(e).__name__)
             return None
 
     async def _fetch_credentials(self, network_files_batch: list[tuple[str, str]], header, session: aiohttp.ClientSession):
         tasks = [self._get_request(url_tuple, header, session) for url_tuple in network_files_batch]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await self.cancellation_manager.gather(tasks)
         return [r for r in results if isinstance(r, tuple)]
 
     async def process_credentials(self, network_files: list[tuple[str, str]]):
         FG, BT, FR, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Style.RESET_ALL
-        connector = aiohttp.TCPConnector(
-            ssl=False,
+        connector = PublicDestinationConnector(
+            ssl=True,
             limit_per_host=self.max_concurrent_requests,
             force_close=False,
             keepalive_timeout=300,
@@ -157,28 +162,36 @@ class ScanerCredentials:
         try:
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 for batch_num, i in enumerate(range(0, len(network_files), self.batch_size), 1):
+                    if self.cancellation_manager.cancelled:
+                        logger.info("Processing cancelled, stopping...")
+                        break
+
                     batch = network_files[i:i + self.batch_size]
                     try:
                         logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Network Urls" + S)
                         results = await self._fetch_credentials(batch, header, session)
                         all_results.extend(results)
-                        logger.info(FR + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Network Urls" + S)
+                        logger.info(FG + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Network Urls" + S)
                         if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains with 50 batch_size)
                             pause_time = min(len(batch) / 100, 3)
                             await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
 
+                    except asyncio.CancelledError:
+                        logger.info("Batch processing cancelled")
+                        break
                     except Exception as e:
-                        logger.error(f"Batch {batch_num} failed: {str(e)}")
+                        logger.error("Batch %d failed (%s)", batch_num, type(e).__name__)
                         continue
 
         except (asyncio.CancelledError, KeyboardInterrupt):
             logger.info("\nOperation cancelled, cleaning up...")
+            await self.cancellation_manager.cancel_all()
+        finally:
+            await connector.close()
 
         return all_results
 
-    @staticmethod
-    async def get_results(network_files: list[tuple[str, str]]) -> list[tuple]:
+    async def get_results(self, network_files: list[tuple[str, str]]) -> list[tuple]:
         logging.basicConfig(level=logging.INFO, format='%(message)s')
-        scraper = ScanerCredentials()
-        results = await scraper.process_credentials(network_files=network_files)
+        results = await self.process_credentials(network_files=network_files)
         return results

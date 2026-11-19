@@ -121,7 +121,8 @@ def get_header() -> dict:
 # Function to configure cross-platform settings
 def configure_platform_settings():
     if sys.platform.startswith('win'):
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        # The native proactor wakes its I/O wait when the main thread receives a signal.
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
         multiprocessing.set_start_method('spawn', force=True)
     else:
         multiprocessing.set_start_method('fork', force=True)
@@ -161,6 +162,9 @@ def remove_byte_content_urls(internal_urls):
 
 
 def calculate_optimal_chunk_size(sample_urls: Union[list[str], list[tuple[str, str]]], min_size: int = 1000, max_size: int = 10000, memory_safety_factor: float = 0.5, domains_input: Union[list[str]] = None, tld_extract: Union[None, tldextract.tldextract.TLDExtract] = None) -> int:
+    if not sample_urls:
+        return min_size
+
     FG, BT, FR, FY, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Fore.YELLOW, Style.RESET_ALL
     logging.basicConfig(level=logging.INFO, format='%(message)s')
     try:
@@ -199,7 +203,7 @@ def calculate_optimal_chunk_size(sample_urls: Union[list[str], list[tuple[str, s
         return chunk_size
 
     except Exception as e:
-        logging.error(f"Error calculating optimal chunk size: {e}")
+        logging.error("Error calculating optimal chunk size (%s)", type(e).__name__)
         return min_size
 
 

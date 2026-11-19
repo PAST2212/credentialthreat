@@ -27,16 +27,17 @@ Find leaked credentials and sensitive data (e.g., tokens, API keys) based on URL
 
    
 ### CSV Output
-The CSV file is created in the `credentialthreat/data/output` folder with the following columns:
-- Base URL: URL with affected sensitive data candidate
-- Affected Network Resource from Base URL
-- Registered Domain of Base URL
-- Credential Sensitive Data Candidate
+The CLI creates `Credential_Leak_Candidates_Redacted_YYYY-MM-DD.csv` in `credentialthreat/data/output/`. Each semicolon-delimited row represents a matched value at one text position in a resource. The four columns contain the page origin, resource origin, registered domain of the page, and matched categories. Rules matching exactly the same span share a row, for example `Unverified api_key + aws_keys [REDACTED]`. Repeated values at different positions get separate rows. Existing rows in a daily report keep their original counts.
 
-### Example Output
-![CSV Output Example](https://github.com/PAST2212/credentialthreat/assets/124390875/4c3dca5b-ff4b-4fbf-beef-7bf7f401e203)
+Reports identify origins by scheme, host and port. Paths, URL credentials, queries, fragments and matched values are omitted. The console summarizes targets by count. Discovery errors identify the provider or stage, exception type and HTTP status when available. Older reports can contain raw values and keep their original filenames.
+
+A match can be a public identifier or a documentation example. Assess it against the owner's source and deployment records before treating it as an incident.
+
+Run `python tests/measure_rules.py` to reproduce per-rule precision, recall and error locations on the labeled synthetic HTML corpus. [Benchmark results and labeling criteria](reports/website-scan-review/README.md#offline-precision-and-recall)
 
 ## Installation
+
+Use Python 3.12 or later.
 
 ```bash
 git clone https://github.com/PAST2212/credentialthreat
@@ -74,15 +75,39 @@ git pull
 
 ## Configuration
 
-1. Add domain name to `credentialthreat/data/input/domains.txt`
+### Passive coverage report
 
-## Example Results
+Run `python credentialthreat.py coverage example.com otto.de amazon.com` to report aggregate counts for those exact hostnames. Add `--samples 50` to repeat the measurement in round-robin order within the current UTC clock hour. Use `--source mnemonic` or `--source urlscan.io` to query one provider. The report uses only existing public observations. It makes read-only requests to the providers and leaves the website scanner idle. HTTPS verifies hostnames and certificate chains. If you configure an explicit CA store with `SSL_CERT_FILE` or `SSL_CERT_DIR`, coverage respects that selection.
 
-![Result Example 1](https://github.com/PAST2212/credentialthreat/assets/124390875/88201216-622a-475e-8162-22bd811eacbf)
+| Source | Count | Anonymous limits |
+| --- | --- | --- |
+| mnemonic PassiveDNS | Historical A records for the exact hostname. The report reads the total even though it requests a single record. | 10 requests per minute and 1,000 per day. The public guide gives no hourly figure. [Provider guide](https://docs.mnemonic.no/service-integration-guides/passivedns/docs/public/01-public_api.html) |
+| urlscan.io | Public scans whose final hostname matches exactly. The query requests the preceding 30 complete UTC dates. The provider may restrict anonymous history further. At the service's count cap, the report marks the total as a lower bound. | The CLI reads and prints the minute, hour and day quotas and remaining search requests for the current client. On 19 November 2026 the anonymous quota endpoint returned 30/minute, 100/hour and 500/day. [Search API](https://docs.urlscan.io/apis/urlscan-openapi/search/searchdatasource) · [Quota windows](https://docs.urlscan.io/pages/api-rate-limits) |
 
-![Result Example 2](https://github.com/PAST2212/credentialthreat/assets/124390875/c24536c5-c3ec-464f-a952-22a37aa89b4d)
+CSV goes to standard output. Quotas and time bounds go to standard error, so append `> coverage.csv` to save just the observations. Each row records the UTC time, sample, domain, provider, status, count, whether it is exact or a lower bound, and any error or skip reason. `empty` is a confirmed zero. `errors` marks a failed attempt and `skipped` an unsent query. Either makes the command exit with code 1. Repetition measures short-term availability and stability of reported counts.
 
-![Result Example 3](https://github.com/PAST2212/credentialthreat/assets/124390875/b99da01b-227c-4f87-88e9-60ea2e057be6)
+The three-domain verification received 250 valid data responses during one UTC quota hour. [Live measurement and offline tests](reports/osint-coverage/README.md)
+
+### Website scanner
+
+Copy `credentialthreat/data/input/domains.example.txt` to `domains.txt` in the same directory. Enter one authorized DNS hostname per line. Each entry includes that host and its descendants. For example, `docs.example.com` excludes `example.com` and `shop.example.com`. The CLI rejects wildcard entries, public suffixes and URL-shaped entries. Git ignores the editable file.
+
+The three website-fetch stages verify HTTPS certificates and skip redirect responses, including redirects to the same host. Discovery providers receive the domain names they are asked to look up.
+
+The CLI shows the published request limits before discovery and in `python credentialthreat.py --help`. Provider sources were checked on 19 November 2026.
+
+| Discovery service | Requests per minute | Requests per hour | Requests per day | Source |
+| --- | --- | --- | --- | --- |
+| crt.sh HTTPS (including JSON searches) | 5 per IP | unknown | unknown | [Operator statement, 9 June 2023](https://groups.google.com/g/crtsh/c/QXQFoy331pE) |
+| RapidDNS web search (`/s/{domain}`) | 30 per public IP | unknown | unknown | [RapidDNS site usage guide](https://rapiddns.io/help/usage) |
+
+`unknown` means the cited provider material gives no separate quota for that period. Clients behind the same public IP share the minute quota. The scanner paces provider batches and can send several domain requests within a batch.
+
+The CLI queries crt.sh and RapidDNS for each configured domain, then collects internal links from the in-scope hosts. It reports query counts for each provider. `hits` means at least one in-scope result, `empty` means the provider confirmed zero records, and `filtered` means it returned records but none qualified. `errors` includes DNS failures, timeouts, HTTP errors and unrecognized responses, even with HTTP 200. If any query fails, the CLI writes the available results and exits with code 1. A completed scan with only confirmed empty responses exits with code 0.
+
+When no eligible pages or resources remain, the CLI writes the report immediately and skips the remaining worker pools. In a Linux benchmark with two workers, this saved 5.50 MiB of proportional memory in the empty final stage. [Benchmark setup and timing](reports/empty-stage/README.md)
+
+Website and discovery connections require public unicast addresses. If DNS returns a private or otherwise excluded address, the scanner skips the whole answer, even when it also contains a public address. This excludes internal-only sites and applies to cached answers and IP literals. Domain parsing uses the bundled public suffix list, including private suffixes.
 
 ## Changelog
 
