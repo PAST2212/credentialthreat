@@ -33,7 +33,7 @@ class CliTests(unittest.TestCase):
                     files_mock.return_value.get_domains.return_value = [host]
                     pools = Mock(wraps=ThreadPool)
                     links = Mock(return_value=([] if no_pages else [f"https://{host}/"], set()))
-                    resources = Mock(return_value=([], set(), {}))
+                    resources = Mock(return_value=([], set(), [], {}))
                     matches = Mock(return_value=[])
                     discovery = QueryResult("crt.sh", host, None, reason="timeout") if discovery_failed else QueryResult("crt.sh", host, 0)
                     stack.enter_context(patch.dict(main.__globals__, {
@@ -95,7 +95,7 @@ class CliTests(unittest.TestCase):
 
         def resources(args):
             seen_pages.extend(args[0])
-            return [utils.ScrapNetworkUrls(base, resource), utils.ScrapNetworkUrls(base, sibling)], set(), {}
+            return [utils.ScrapNetworkUrls(base, resource), utils.ScrapNetworkUrls(base, sibling)], set(), [], {}
 
         def matches(arg):
             seen_resources.extend(arg[0])
@@ -136,6 +136,117 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(marker, console + str(rows))
         self.assertNotIn(synthetic_id, console + str(rows))
 
+    def test_page_is_fetched_once_and_its_candidates_reach_the_report(self):
+        main = CLI["main"]
+        host = "docs.example.com"
+        base = "https://" + host
+        page = base + "/guide"
+        script = base + "/app.js"
+        marker = "PRIVATEFIXTUREONLY"
+        bodies = {
+            page: f'<link rel="canonical" href="{page}"><script src="/app.js"></script>'
+                  f'<script>var api_key = "{marker}";</script>',
+            script: f'client_secret = "{marker}";',
+        }
+        requested = []
+
+        def get(url, **kwargs):
+            requested.append(url)
+            manager = MagicMock()
+            manager.__aenter__.return_value = http_response(200, bodies[url], {"Content-Type": "text/html"})
+            return manager
+
+        stdout = io.StringIO()
+        with TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(files, "OUTPUT_DIRECORY", Path(tmp)))
+            stack.enter_context(patch.object(files.ManageFiles, "get_domains", return_value=[host]))
+            stack.enter_context(patch.object(CLI["utils"], "get_workers", return_value=1))
+            stack.enter_context(patch.object(CLI["utils"], "configure_platform_settings"))
+            stack.enter_context(patch("aiohttp.ClientSession.get", new=Mock(side_effect=get)))
+            stack.enter_context(patch.dict(main.__globals__, {
+                "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=10),
+                "create_pool": ThreadPool,
+                "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
+                "process_chunks_for_internallinks": lambda args: ([page], {}),
+            }))
+            stack.enter_context(contextlib.redirect_stdout(stdout))
+            with self.assertLogs(level="INFO") as logs:
+                self.assertEqual(main(), 0)
+            report, = Path(tmp).glob("*.csv")
+            with report.open(encoding="utf-8", newline="") as stream:
+                header, *rows = csv.reader(stream, delimiter=";")
+        self.assertCountEqual(requested, [page, script])
+        self.assertCountEqual([row[3] for row in rows],
+                              ["Unverified api_key [REDACTED]", "Unverified client_secret [REDACTED]"])
+        self.assertEqual({(row[0], row[1]) for row in rows}, {(base, base)})
+        console = stdout.getvalue() + " ".join(logs.output)
+        self.assertIn("Unverified credential matches: 2 (affected resources: 2)", console)
+        self.assertNotIn(marker, console + str(rows))
+
+    def test_page_candidates_are_reported_when_no_resources_remain(self):
+        main = CLI["main"]
+        host = "shop.example.com"
+        page = f"https://{host}/"
+        candidate = ("https://" + host, "https://" + host, [("api_key", "[REDACTED]")])
+        files_mock = Mock()
+        files_mock.return_value.get_domains.return_value = [host]
+        pools = Mock(wraps=ThreadPool)
+        matches = Mock(return_value=([], {}))
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(CLI["utils"], "get_workers", return_value=1))
+            stack.enter_context(patch.object(CLI["utils"], "configure_platform_settings"))
+            stack.enter_context(patch.dict(main.__globals__, {
+                "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=10),
+                "ManageFiles": files_mock, "create_pool": pools,
+                "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
+                "process_chunks_for_internallinks": lambda args: ([page], {}),
+                "process_chunks_for_networksearch": lambda args: ([], {page}, [candidate], {"ok": 1}),
+                "process_chunks_for_credentialsearch": matches,
+            }))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertLogs(level="INFO") as logs:
+                self.assertEqual(main(), 0)
+        matches.assert_not_called()
+        self.assertEqual(pools.call_count, 2)
+        files_mock.write_csv_result_file.assert_called_once_with(iterables=[candidate])
+        self.assertIn("Unverified credential matches: 1 (affected resources: 1)", " ".join(logs.output))
+
+    def test_resource_limit_counts_only_resources_that_are_not_pages(self):
+        main = CLI["main"]
+        utils = CLI["utils"]
+        host = "shop.example.com"
+        pages = [f"https://{host}/p/{index}" for index in range(2)]
+        scripts = [f"https://{host}/s/{index}.txt" for index in range(2)]
+        seen_resources = []
+
+        def page_worker(args):
+            # Every page links both pages (e.g. canonical and alternate links) and one script.
+            found = [utils.ScrapNetworkUrls(page, other) for page in args[0] for other in pages]
+            found += [utils.ScrapNetworkUrls(page, script) for page, script in zip(pages, scripts)]
+            return found, set(args[0]), [], {"ok": len(args[0])}
+
+        def resource_worker(arg):
+            seen_resources.extend(arg[0])
+            return [], {}
+
+        with contextlib.ExitStack() as stack:
+            files_mock = Mock()
+            files_mock.return_value.get_domains.return_value = [host]
+            stack.enter_context(patch.object(utils, "get_workers", return_value=1))
+            stack.enter_context(patch.object(utils, "configure_platform_settings"))
+            stack.enter_context(patch.dict(main.__globals__, {
+                "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=2),
+                "ManageFiles": files_mock, "create_pool": ThreadPool,
+                "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
+                "process_chunks_for_internallinks": lambda args: (pages, {}),
+                "process_chunks_for_networksearch": page_worker,
+                "process_chunks_for_credentialsearch": resource_worker,
+            }))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertLogs(level="INFO"):
+                self.assertEqual(main(), 0)
+        self.assertCountEqual([resource for _, resource in seen_resources], scripts)
+
     def test_each_host_and_page_enters_its_stage_once(self):
         main = CLI["main"]
         root = "example.com"
@@ -152,7 +263,7 @@ class CliTests(unittest.TestCase):
 
         def page_worker(args):
             seen_pages.extend(args[0])
-            return [], set(), {}
+            return [], set(), [], {}
 
         with contextlib.ExitStack() as stack:
             files_mock = Mock()
@@ -182,7 +293,7 @@ class CliTests(unittest.TestCase):
 
         def page_worker(args):
             page_chunks.append(list(args[0]))
-            return [utils.ScrapNetworkUrls(page, page + ".js") for page in args[0]], set(), {}
+            return [utils.ScrapNetworkUrls(page, page + ".js") for page in args[0]], set(), [], {}
 
         def resource_worker(arg):
             resource_chunks.append(list(arg[0]))
@@ -233,7 +344,7 @@ class CliTests(unittest.TestCase):
                 "ManageFiles": files_mock, "create_pool": ThreadPool,
                 "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
                 "process_chunks_for_internallinks": remember(([page], {})),
-                "process_chunks_for_networksearch": remember(([utils.ScrapNetworkUrls(page, page)], set(), {})),
+                "process_chunks_for_networksearch": remember(([utils.ScrapNetworkUrls(page, page + "app.js")], set(), [], {})),
                 "process_chunks_for_credentialsearch": remember(([], {})),
             }))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
@@ -259,7 +370,7 @@ class CliTests(unittest.TestCase):
                 "process_chunks_for_internallinks": lambda args: (
                     [page], {"ok": 1, "redirect skipped": 2, "connect timeout": 3}),
                 "process_chunks_for_networksearch": lambda args: (
-                    [utils.ScrapNetworkUrls(page, page)], set(), {"ok": 1}),
+                    [utils.ScrapNetworkUrls(page, page + "app.js")], set(), [], {"ok": 1}),
                 "process_chunks_for_credentialsearch": lambda args: ([], {"ok": 4, "HTTP 429": 5}),
             }))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))

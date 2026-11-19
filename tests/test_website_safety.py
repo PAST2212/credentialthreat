@@ -176,7 +176,7 @@ class WebsiteSafetyTests(unittest.IsolatedAsyncioTestCase):
         session, _ = session_returning(200, "<html></html>")
         result = await scanner._fetch_network_sources("https://example.com.other.invalid/",
                                                      ["example.com"], PSL, {}, session)
-        self.assertEqual(result, [])
+        self.assertEqual(result, ([], []))
         session.get.assert_not_called()
 
     async def test_resource_attributes_and_inline_references_respect_host_boundaries(self):
@@ -184,6 +184,6 @@ class WebsiteSafetyTests(unittest.IsolatedAsyncioTestCase):
         html = """<script src="/local.js"></script>
         <script src="https://example.com.other.invalid/bad.js"></script>
         <script>require("https://elsewhere.invalid/other.js")</script>"""
-        with patch.object(scanner, "_get_request", new=AsyncMock(return_value=(SITE, BeautifulSoup(html, "html.parser")))):
-            found = await scanner._fetch_network_sources(SITE, ["example.com"], PSL, {}, Mock())
-        self.assertEqual({item.script_url for item in found}, {SITE, SITE + "/local.js"})
+        with patch.object(scanner, "_get_request", new=AsyncMock(return_value=(SITE, html, BeautifulSoup(html, "html.parser")))):
+            found, _ = await scanner._fetch_network_sources(SITE, ["example.com"], PSL, {}, Mock())
+        self.assertEqual({item.script_url for item in found}, {SITE + "/local.js"})

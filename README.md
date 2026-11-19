@@ -58,7 +58,7 @@ python3 credentialthreat.py --limit 200000
 ```
 
 Options:
-- `--limit`: Maximum number of URLs to be scanned (default: 100000)
+- `--limit`: Maximum number of pages to scan, and separately of other resources such as scripts (default: 100000). See [Website scanner](#website-scanner) for how it is applied.
 
 ## Updating
 
@@ -95,6 +95,10 @@ Copy `credentialthreat/data/input/domains.example.txt` to `domains.txt` in the s
 The three website-fetch stages verify HTTPS certificates. They follow a redirect only when its target lies inside the configured scope, for at most three hops, and each hop passes the same address and certificate checks. A redirect to any other host is never requested. Relative links on a redirected page resolve against the final page. Discovery providers receive the domain names they are asked to look up.
 
 Website requests that receive HTTP 429 or 503 are repeated up to two times after the delay in `Retry-After`, capped at 30 seconds. Each worker also paces its requests per host. A 429 or 503 pauses all of that worker's requests to the host for the announced delay and halves its rate for that host, and other responses raise the rate again, up to 25 requests per second. Several workers therefore slow down together instead of multiplying the load on a throttling server. Read timeouts and dropped connections are also repeated. A host that does not accept a connection is not retried. Responses with image, audio, video, font, PDF or archive content types are skipped without downloading the body, and a body is read up to 10 MB. Each worker keeps at most 50 requests in flight, so one slow response does not hold back the others. All workers together open at most 25 connections to one host, and each worker gets an equal share of at least two. A request beyond its worker's share waits before it is sent, so the wait does not count against its timeout. The load on a host therefore does not grow with the number of CPU cores. Peak memory therefore depends on the number of worker processes and the requests in flight, not on the URL limit.
+
+The scanner fetches each page once. The page stage collects the scripts, stylesheets, frames and other resources a page references, and matches the credential rules against the page text in the same request. The credential stage then fetches only those resources. It skips every URL the page stage already requested, for example a page's canonical link to itself, and every page that could not be read. Matches in a page appear in the report with the page origin in both origin columns.
+
+`--limit` caps two lists separately: the pages taken from link discovery, and the other resources sent to the credential stage. Pages never count against the resource cap, because they are not fetched again. A scan therefore requests at most twice the limit, plus redirect hops and retries.
 
 After each website stage the CLI prints how many requests returned content and why the others were skipped, for example `Credential scan requests: ok=4, skipped=5 (HTTP 429=5)`. The line is a warning when anything was skipped. A URL limit keeps the same URLs on every run because candidates are sorted before prioritization. [Throughput and coverage measurements](reports/scan-throughput/README.md)
 

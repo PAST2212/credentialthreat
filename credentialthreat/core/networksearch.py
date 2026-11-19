@@ -15,9 +15,10 @@ from aiolimiter import AsyncLimiter
 from bs4 import BeautifulSoup
 from bs4 import MarkupResemblesLocatorWarning
 from bs4 import XMLParsedAsHTMLWarning
+from credentialthreat.core.credentialsearch import ScanerCredentials
 from credentialthreat.core.fetch import HostPacer, fetch_text, get_header
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
-from credentialthreat.core.website import PublicDestinationConnector, canonical_url, is_binary_url, url_in_scope
+from credentialthreat.core.website import PublicDestinationConnector, canonical_url, is_binary_url, report_origin, url_in_scope
 
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,8 @@ class ScrapNetworkUrls:
 class ScanerNetworkResources:
     def __init__(self, max_concurrent_requests: int = 25, window_size: int = 50, scope=(),
                  host_connections: int | None = None) -> None:
-        self.blacklist: set[str] = set()
+        self.pages: set[str] = set()  # page URLs requested here, read or not, including redirect targets
+        self.matcher = ScanerCredentials()  # only its rules are used; it sends no requests
         self.max_concurrent_requests = max_concurrent_requests
         self.host_connections = host_connections or max_concurrent_requests  # this worker's share
         self.window_size = window_size  # requests in flight per worker process
@@ -45,20 +47,20 @@ class ScanerNetworkResources:
         self.scope = tuple(scope)
         self.outcomes: Counter = Counter()
 
-    async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, tuple[str, BeautifulSoup]]:
-        """Final page URL and parsed markup, or None when the page could not be read."""
+    async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, tuple[str, str, BeautifulSoup]]:
+        """Final page URL, page text and parsed markup, or None when the page could not be read."""
         page = await fetch_text(session, url, header, scope=self.scope, limiter=self.rate_limiter,
                                 pacer=self.pacer, outcomes=self.outcomes)
         if page is None:
             return None
-        text = page.text
+        markup = page.text
         # WordPress JSON API responses embed HTML with escaped URLs; re-serializing unescapes them.
         if 'application/json' in page.content_type:
             try:
-                text = f"<html><body>{json.dumps(json.loads(text))}</body></html>"
+                markup = f"<html><body>{json.dumps(json.loads(markup))}</body></html>"
             except json.JSONDecodeError:
                 pass
-        return page.url, BeautifulSoup(text, 'html.parser')
+        return page.url, page.text, BeautifulSoup(markup, 'html.parser')
 
     @staticmethod
     def _clean_url(url: str) -> str:
@@ -96,18 +98,24 @@ class ScanerNetworkResources:
                 results.append(ScrapNetworkUrls(base_url, full_url))
         return results
 
-    async def _fetch_network_sources(self, url: str, domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract, header, session: aiohttp.ClientSession) -> list[ScrapNetworkUrls]:
+    async def _fetch_network_sources(self, url: str, domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract, header, session: aiohttp.ClientSession) -> tuple[list[ScrapNetworkUrls], list[tuple]]:
+        """Resources the page references, and the redacted candidates in the page text itself.
+
+        The page is fetched once here; the credential stage does not request it again.
+        """
         results = []
+        candidates = []
         try:
             url = canonical_url(self._clean_url(url)) or ""
             if not url_in_scope(url, domains_input):
-                return results
+                return results, candidates
+            self.pages.add(url)
             fetched = await self._get_request(url, header, session)
-            if fetched is None:
-                self.blacklist.add(url)
-            else:
-                url, soup = fetched
-                results.append(ScrapNetworkUrls(url, url))
+            if fetched is not None:
+                url, text, soup = fetched
+                self.pages.add(url)
+                if findings := self.matcher._findings(text):
+                    candidates.append((report_origin(url), report_origin(url), findings))
 
                 for script in soup.find_all("script"):
                     results.extend(self._extract_url(script, 'src', url, domains_input, tld_extract))
@@ -133,11 +141,11 @@ class ScanerNetworkResources:
                                         results.append(ScrapNetworkUrls(url, imported_url))
 
         except Exception:
-            self.blacklist.add(url)
+            self.pages.add(url)
 
-        return results
+        return results, candidates
 
-    async def process_network_sources(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> list[ScrapNetworkUrls]:
+    async def process_network_sources(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[list[ScrapNetworkUrls], list[tuple]]:
         connector = PublicDestinationConnector(
             ssl=True,
             limit_per_host=self.host_connections,
@@ -150,13 +158,16 @@ class ScanerNetworkResources:
         header = get_header()
 
         all_results = []
+        all_candidates = []
         try:
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 results = await self.cancellation_manager.run_window(
                     network_points,
                     lambda url: self._fetch_network_sources(url, domains_input, tld_extract, header, session),
                     self.window_size)
-                all_results = [item for found in results if isinstance(found, list) for item in found]
+                scanned = [found for found in results if isinstance(found, tuple)]
+                all_results = [item for resources, _ in scanned for item in resources]
+                all_candidates = [candidate for _, candidates in scanned for candidate in candidates]
 
         except (asyncio.CancelledError, KeyboardInterrupt):
             logger.info("Operation cancelled, cleaning up...")
@@ -164,10 +175,10 @@ class ScanerNetworkResources:
         finally:
             await connector.close()
 
-        return all_results
+        return all_results, all_candidates
 
-    async def get_results(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[list[ScrapNetworkUrls], set[str], dict[str, int]]:
-        """Resources found on the pages, the pages that could not be read, and the request outcome counts."""
+    async def get_results(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[list[ScrapNetworkUrls], set[str], list[tuple], dict[str, int]]:
+        """Resources found on the pages, the page URLs requested, the redacted candidates in the page texts, and the request outcome counts."""
         logging.basicConfig(level=logging.INFO, format='%(message)s')
-        results = await self.process_network_sources(network_points=network_points, domains_input=domains_input, tld_extract=tld_extract)
-        return results, self.blacklist, dict(self.outcomes)
+        results, candidates = await self.process_network_sources(network_points=network_points, domains_input=domains_input, tld_extract=tld_extract)
+        return results, self.pages, candidates, dict(self.outcomes)

@@ -30,8 +30,8 @@ def configure_platform_settings():
         multiprocessing.set_start_method('fork', force=True)
 
 
-def deduplicate_script_urls(whitelist: list[ScrapNetworkUrls], blacklist: list[str]) -> list[tuple[str, str]]:
-    """Deduplicate network URLs, keeping only unique script URLs."""
+def deduplicate_script_urls(whitelist: list[ScrapNetworkUrls], blacklist: set[str]) -> list[tuple[str, str]]:
+    """Deduplicate network URLs, keeping only unique script URLs that are not in the blacklist."""
     network_files_dict = {}
     for item in whitelist:
         # Use script_url as key and origin_url as value

@@ -23,8 +23,8 @@ Always go through `discover -s tests`. `test_rule_benchmark.py` imports `credent
 
 1. **Discovery** (`core/subdomainsearch.py`) runs in the parent process. It queries crt.sh and RapidDNS for every configured domain and keeps only in-scope hosts.
 2. **Internal links** (`core/internallinksearch.py`) fetches each host's home page and collects its `<a href>` links.
-3. **Network resources** (`core/networksearch.py`) collects script, link, iframe and other resource URLs, plus inline `import`/`require` targets, from those pages.
-4. **Credentials** (`core/credentialsearch.py`) fetches each resource and matches the credential rules against the response text.
+3. **Network resources** (`core/networksearch.py`) fetches each page once. It collects script, link, iframe and other resource URLs, plus inline `import`/`require` targets, and matches the credential rules (`ScanerCredentials._findings`) against the page text. Its worker returns `(resources, requested pages, redacted page candidates, outcomes)`.
+4. **Credentials** (`core/credentialsearch.py`) fetches each remaining resource and matches the credential rules against the response text. The CLI drops every URL that stage 3 requested, so a page is never fetched twice, and merges both candidate lists before writing the report.
 
 Stages 2–4 share one pattern:
 
@@ -33,7 +33,7 @@ Stages 2–4 share one pattern:
 - Each chunk goes to a module-level `process_chunks_for_*` function, which calls `asyncio.run` on a scanner class constructed with `scope=domains`. Workers return their results plus a dict of request outcomes. The parent sums the outcomes and logs one `... requests: ok=N, skipped=M (...)` line per stage.
 - Inside a worker, `AsyncCancellationManager.run_window` keeps `window_size` requests in flight (a sliding window, not batches), so one slow response never holds back the others.
 - The parent reads results through `GracefulKiller.pool_results`, which converts SIGINT/SIGTERM into `ScanInterrupted`.
-- `UrlPrioritizer` in `core/utils.py` caps each stage's input at `--limit` and takes high-priority URL patterns first.
+- `UrlPrioritizer` in `core/utils.py` caps each stage's input at `--limit` and takes high-priority URL patterns first. Pages and the other resources are capped separately; pages never count against the resource cap.
 - When a stage has no input, the CLI writes the report straight away and skips the remaining pools. Tests cover this.
 
 The workers have to survive multiprocessing:

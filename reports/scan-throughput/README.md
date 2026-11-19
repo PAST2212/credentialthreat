@@ -76,9 +76,9 @@ The intermediate runs show why the fixes depend on each other:
 
 ## Remaining limits
 
-- Pages are fetched in the resource stage and again in the credential stage. In Run A this accounts for 3,009 of 9,035 requests. Scanning the page text in the resource stage would remove them, but it changes what `--limit` counts.
+- Pages were fetched in the resource stage and again in the credential stage. In Run A this accounted for 3,009 of 9,035 requests. A later change matches the page text in the resource stage and sends only the other resources to the credential stage, so each page is fetched once. The runs above predate that change and were not repeated.
 - Peak memory is dominated by the worker processes, at about 360–560 MiB for the process tree with five workers. Each worker holds at most 50 bodies of up to 10 MB at once.
 - The scan follows links of the start pages only and does not execute JavaScript. Scripts loaded only from other scripts are not found.
-- `--limit` applies to the page stage and the credential stage separately.
+- `--limit` applies to the pages and to the other resources separately. Since pages are no longer fetched again, they no longer count against the resource cap.
 - One intermediate Windows run logged an asyncio `WinError 10022` while closing a TLS connection. The final runs did not reproduce it.
 - The measurement harness is not part of the repository. The offline tests cover each behavior listed above.

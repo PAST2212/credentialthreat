@@ -208,7 +208,7 @@ class ProviderCliTests(unittest.TestCase):
                     "ManageFiles": files, "time": Mock(perf_counter=time.perf_counter),
                     "parse_arguments": lambda: Mock(limit=5),
                     "create_pool": ThreadPool, "process_chunks_for_internallinks": links,
-                    "process_chunks_for_networksearch": lambda _: ([], set(), {}),
+                    "process_chunks_for_networksearch": lambda _: ([], set(), [], {}),
                     "process_chunks_for_credentialsearch": lambda _: ([], {}),
                 }))
                 console = io.StringIO()

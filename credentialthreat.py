@@ -62,7 +62,7 @@ def parse_arguments():
         epilog=DISCOVERY_LIMITS,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('-l', '--limit', type=int, default=100000, help='Maximum number of URLs to scan (default: 100000)')
+    parser.add_argument('-l', '--limit', type=int, default=100000, help='Maximum number of pages to scan, and separately of other resources such as scripts (default: 100000)')
     modes = parser.add_subparsers(dest="command")
     coverage = modes.add_parser("coverage", help="Report passive counts for exact domain names")
     coverage.add_argument("domains", nargs="+", metavar="DOMAIN", type=coverage_domain)
@@ -208,7 +208,8 @@ def _run_scan(killer):
         worker = partial(process_chunks_for_networksearch)
 
         network_files_whitelist = []
-        network_files_blacklist: set = set()
+        scanned_pages: set = set()
+        leaks = []  # candidates in the page texts, matched by the page workers
         page_outcomes: Counter = Counter()
         completed_chunks = 0
 
@@ -220,12 +221,14 @@ def _run_scan(killer):
         try:
             with killer.defer_pool_signals(), create_pool(processes=num_processes) as pool:
                 for chunk_result in killer.pool_results(pool, worker, process_chunks):
-                    network_f_whitelist, network_f_blacklist, outcomes = chunk_result
+                    network_f_whitelist, pages, page_leaks, outcomes = chunk_result
                     network_files_whitelist.extend(network_f_whitelist)
-                    network_files_blacklist.update(network_f_blacklist)
+                    scanned_pages.update(pages)
+                    leaks.extend(page_leaks)
                     page_outcomes.update(outcomes)
                     completed_chunks += 1
-                    logging.info(FG + f"Chunk {completed_chunks}/{total_chunks} completed: {len(network_f_whitelist)} Network URLs found\n" + S)
+                    logging.info(FG + f"Chunk {completed_chunks}/{total_chunks} completed: {len(network_f_whitelist)} Network URLs found, "
+                                      f"{len(page_leaks)} pages with candidates\n" + S)
 
         except KeyboardInterrupt:
             logging.info("\nNetwork scan cancelled by user")
@@ -236,7 +239,9 @@ def _run_scan(killer):
         _log_outcomes("Network resource scan", page_outcomes)
 
         network_files_whitelist = list({obj.script_url: obj for obj in reversed(network_files_whitelist)}.values())
-        network_files_normalized = utils.deduplicate_script_urls(whitelist=network_files_whitelist, blacklist=list(network_files_blacklist))
+        # The page workers already matched every page they requested, so the credential stage, and the
+        # --limit applied to it, covers only the other resources.
+        network_files_normalized = utils.deduplicate_script_urls(whitelist=network_files_whitelist, blacklist=scanned_pages)
         network_files_normalized = [(base, resource) for base, resource in network_files_normalized
                                     if url_in_scope(base, domains) and url_in_scope(resource, domains)]
         logging.info(f'\n{len(network_files_normalized)} Normalized Network URLs were found')
@@ -246,13 +251,12 @@ def _run_scan(killer):
         logging.info(FG + f'End Network Resource Scan: {end1-start1:.2f} Seconds needed' + S)
 
         if not network_files_scaled:
-            return _write_scan_report([], status)
+            return _write_scan_report(leaks, status)
         process_chunks = [(chunk, domains, host_connections) for chunk in utils.plan_chunks(network_files_scaled, num_processes)]
         total_chunks = len(process_chunks)
 
         worker = partial(process_chunks_for_credentialsearch)
 
-        leaks = []
         resource_outcomes: Counter = Counter()
         completed_chunks = 0
 

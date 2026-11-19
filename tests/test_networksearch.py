@@ -36,11 +36,35 @@ class RedirectedPageTests(unittest.IsolatedAsyncioTestCase):
             response(200, '<script src="js/app.js"></script>', {"Content-Type": "text/html"}),
         )
         scanner = ScanerNetworkResources(scope=["example.com"])
-        found = await scanner._fetch_network_sources("https://www.example.com/", ["example.com"], PSL, {}, session)
+        found, _ = await scanner._fetch_network_sources("https://www.example.com/", ["example.com"], PSL, {}, session)
         self.assertEqual([(item.origin_url, item.script_url) for item in found], [
-            ("https://www.example.com/de/", "https://www.example.com/de/"),
             ("https://www.example.com/de/", "https://www.example.com/de/js/app.js"),
         ])
+        self.assertEqual(scanner.pages, {"https://www.example.com/", "https://www.example.com/de/"})
+
+
+class PageCandidateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_page_text_is_matched_once_and_reported_redacted(self):
+        marker = "PRIVATEFIXTUREONLY"
+        page = PAGE + "?session=" + marker
+        session = session_returning(response(
+            200, f'<script src="/app.js"></script><script>var api_key = "{marker}";</script>',
+            {"Content-Type": "text/html"}))
+        scanner = ScanerNetworkResources(scope=["example.com"])
+        resources, candidates = await scanner._fetch_network_sources(page, ["example.com"], PSL, {}, session)
+        self.assertEqual(session.get.call_count, 1)
+        self.assertEqual([item.script_url for item in resources], ["https://www.example.com/app.js"])
+        self.assertEqual(candidates, [("https://www.example.com", "https://www.example.com",
+                                       [("api_key", "[REDACTED]")])])
+        self.assertNotIn(marker, str(candidates))
+        self.assertEqual(scanner.pages, {page})
+        self.assertEqual(dict(scanner.outcomes), {"ok": 1})
+
+    async def test_unreadable_page_is_recorded_without_candidates(self):
+        session = session_returning(response(200, "", {"Content-Type": "application/pdf"}))
+        scanner = ScanerNetworkResources(scope=["example.com"])
+        self.assertEqual(await scanner._fetch_network_sources(PAGE, ["example.com"], PSL, {}, session), ([], []))
+        self.assertEqual(scanner.pages, {PAGE})
 
 
 class ResourceExtractionTests(unittest.TestCase):
