@@ -27,6 +27,28 @@ class AsyncCancellationManager:
         finally:
             self.remove_task(batch)
 
+    async def run_window(self, items, handle, window: int) -> list:
+        """Await handle(item) for every item with at most `window` running; results keep input order.
+
+        A free slot takes the next item at once, so one slow item does not hold back the others.
+        After cancel_all no further item starts. A failing item yields its exception as result.
+        """
+        items = list(items)
+        results: list = [None] * len(items)
+        pending = iter(enumerate(items))
+
+        async def slot():
+            for index, item in pending:
+                if self.cancelled:
+                    return
+                try:
+                    results[index] = await handle(item)
+                except Exception as exc:
+                    results[index] = exc
+
+        await self.gather([slot() for _ in range(min(max(1, window), len(items)))])
+        return results
+
     async def cancel_all(self) -> None:
         self.cancelled = True
         active = tuple(self._tasks)

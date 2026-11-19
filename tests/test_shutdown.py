@@ -12,7 +12,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from credentialthreat.core.interrupt_handler import GracefulKiller, ScanInterrupted, create_pool, init_worker
+from credentialthreat.core.interrupt_handler import create_pool, init_worker
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,9 +25,12 @@ def hold_job(directory):
     (directory / "finished").touch()
 
 
+HOLD_DIRECTORY = "CREDENTIALTHREAT_TEST_HOLD_DIRECTORY"
+
+
 def hold_first_chunk(args):
-    domains, _ = args
-    hold_job(domains[0])
+    # Spawned workers inherit the environment, so the directory travels outside the scan arguments.
+    hold_job(os.environ[HOLD_DIRECTORY])
     return [], set()
 
 
@@ -157,30 +160,6 @@ class ShutdownTests(unittest.TestCase):
             self.assertLess(time.monotonic() - sent[0], 1.0, "Startup slept through SIGTERM")
             utils.get_workers.assert_not_called()
 
-    def test_calibration_unwinds_and_restores_handlers_for_both_signals(self):
-        cli = runpy.run_path(str(ROOT / "credentialthreat.py"))
-        calibration = cli["utils"].calculate_optimal_chunk_size
-        domain = "example.invalid"
-        cases = (
-            (cli["ScanerNetworkResources"], "_get_network_sources", [domain]),
-            (cli["ScanerCredentials"], "_fetch_credentials", [(domain, domain)]),
-        )
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            for scanner, batch, sample in cases:
-                with self.subTest(signal=signum.name, calibration=scanner.__name__):
-                    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
-
-                    async def interrupt_batch(*args, **kwargs):
-                        signal.raise_signal(signum)
-                        return []
-
-                    with patch.object(scanner, batch, new=interrupt_batch):
-                        with self.assertRaises(ScanInterrupted):
-                            with GracefulKiller().handle_signals():
-                                calibration(sample, domains_input=[domain])
-                    for sig, handler in previous.items():
-                        self.assertEqual(signal.getsignal(sig), handler)
-
     def test_worker_restores_default_termination_handler(self):
         for signum in (signal.SIGINT, signal.SIGTERM):
             self.addCleanup(signal.signal, signum, signal.getsignal(signum))
@@ -214,10 +193,13 @@ class ShutdownTests(unittest.TestCase):
             directory = Path(tmp)
             for signum in (signal.SIGINT, signal.SIGTERM):
                 stack.callback(signal.signal, signum, signal.getsignal(signum))
+            stack.enter_context(patch.dict(os.environ, {HOLD_DIRECTORY: tmp}))
             files = Mock()
-            files.return_value.get_domains.return_value = [tmp]
+            files.return_value.get_domains.return_value = ["example.invalid"]
             utils = Mock()
             utils.get_workers.return_value = 1
+            utils.plan_chunks.side_effect = lambda items, workers: [list(items)]
+            utils.host_connections_per_worker.return_value = 2
             stack.enter_context(patch.dict(main.__globals__, {
                 "time": Mock(), "utils": utils, "ManageFiles": files,
                 "parse_arguments": lambda: type("Args", (), {"command": None, "limit": 1})(),

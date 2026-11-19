@@ -9,6 +9,7 @@ from credentialthreat.core.website import host_in_scope
 
 class ScanerCrtsh(SubdomainProvider):
     name = "crt.sh"
+    retry_pause = 15.0  # published limit: 5 requests per minute
 
     @staticmethod
     async def _scrape_subdomains(session: aiohttp.ClientSession, domain: str) -> tuple[int, set[str]]:

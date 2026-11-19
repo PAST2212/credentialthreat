@@ -62,7 +62,8 @@ class DiscoveryDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         for name, scanner in PROVIDERS:
             with self.subTest(provider=name), capture_diagnostics() as output:
                 session = Mock(get=Mock(return_value=manager))
-                self.assertEqual(await scanner().get_results([DOMAIN], session), set())
+                with patch("asyncio.sleep", new=AsyncMock()):
+                    self.assertEqual(await scanner().get_results([DOMAIN], session), set())
                 self.assert_private_diagnostic(output.getvalue(), name, "503")
 
     async def test_per_domain_failure_handlers_omit_exception_payloads(self):

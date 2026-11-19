@@ -13,7 +13,7 @@ Run everything from the repository root. There is no build step.
 - One test by name: `python -m unittest discover -s tests -k test_combined_categories`
 - Rule precision/recall benchmark: `python tests/measure_rules.py`
 
-Always go through `discover -s tests`. `test_rule_benchmark.py` imports `credential_corpus` and `measure_rules` as top-level modules, so a dotted `python -m unittest tests.test_x` run fails for it. The shutdown test that needs `fork` is skipped on Windows. `test/` (singular) is ignored legacy scratch and is not part of the suite.
+Always go through `discover -s tests`. `test_rule_benchmark.py` imports `credential_corpus` and `measure_rules` as top-level modules, so a dotted `python -m unittest tests.test_x` run fails for it. The same goes for `http_doubles`, the shared response double: it streams `content.iter_chunked` like aiohttp, so build fake responses with it rather than mocking `response.text()`. The shutdown test that needs `fork` is skipped on Windows. `test/` (singular) is ignored legacy scratch and is not part of the suite.
 
 ## Architecture
 
@@ -28,8 +28,10 @@ Always go through `discover -s tests`. `test_rule_benchmark.py` imports `credent
 
 Stages 2–4 share one pattern:
 
-- The parent splits the work into chunks and runs them on a `multiprocessing` pool from `interrupt_handler.create_pool`.
-- Each chunk goes to a module-level `process_chunks_for_*` function, which calls `asyncio.run` on a scanner class.
+- The parent deals the work round-robin into one chunk per worker with `utils.plan_chunks` and runs the chunks on a `multiprocessing` pool from `interrupt_handler.create_pool`. A chunk ends with its slowest request, so more chunks per worker would add idle tails. A real scan showed this: with four chunks per worker, each worker spent over half its time with only one or two requests in flight.
+- Because every worker works on every host at once, the workers share one per-host connection budget: `utils.host_connections_per_worker` hands each worker an equal share of 25, at least two. Workers pass it to the scanners' `host_connections`. Without the budget, five workers reached 61 parallel requests on one real host and lost 80 resources to connect timeouts.
+- Each chunk goes to a module-level `process_chunks_for_*` function, which calls `asyncio.run` on a scanner class constructed with `scope=domains`. Workers return their results plus a dict of request outcomes. The parent sums the outcomes and logs one `... requests: ok=N, skipped=M (...)` line per stage.
+- Inside a worker, `AsyncCancellationManager.run_window` keeps `window_size` requests in flight (a sliding window, not batches), so one slow response never holds back the others.
 - The parent reads results through `GracefulKiller.pool_results`, which converts SIGINT/SIGTERM into `ScanInterrupted`.
 - `UrlPrioritizer` in `core/utils.py` caps each stage's input at `--limit` and takes high-priority URL patterns first.
 - When a stage has no input, the CLI writes the report straight away and skips the remaining pools. Tests cover this.
@@ -41,7 +43,21 @@ The workers have to survive multiprocessing:
 - A worker must not let a `BaseException` escape: that kills the process without resolving its pool result. Convert it, as `process_chunks_for_networksearch` does.
 - The pool size is the physical core count minus one.
 
-`utils.calculate_optimal_chunk_size` makes real requests. It runs a scanner on the first 100 URLs in the parent process to measure memory use per URL. Patch it out in tests.
+### Fetching and URL handling
+
+Every website request goes through `fetch_text` in `core/fetch.py`.
+
+- It follows redirects only to targets inside the scope, for up to three hops. Without a scope it follows none.
+- It retries 429 and 503 responses (honouring `Retry-After`, capped at 30 s), read timeouts and dropped connections. It does not retry connect timeouts or other connection errors.
+- Each scanner owns a `HostPacer`, which hands out the worker's per-host request slots (`connections`). Requests beyond the share wait in `pacer.slot` before reaching aiohttp, because aiohttp counts time spent waiting for a pooled connection against the 45 s total timeout. The pacer also paces requests per host. A 429 or 503 pauses the host and halves its rate, and other responses raise it again. Without it, the parallel workers multiplied the load on throttling servers and lost more pages than the old single-worker stage did. Tests inject a `FakeClock` (in `tests/http_doubles.py`) into `scanner.pacer`. Patching only `asyncio.sleep` leaves the pacer on the real clock.
+- It skips binary content types without reading the body and cuts bodies at 10 MB.
+- Every call adds exactly one entry to the scanner's `outcomes` counter.
+
+Scanners must not open requests any other way.
+
+Links and resource references are resolved with `urljoin` against the final page URL. `website.canonical_url` then reduces them to one spelling: http(s) only, no fragment or userinfo, and `/` for an empty path. `website.is_binary_url` drops binary file extensions. The CLI sorts the canonical page list before prioritizing it, so a URL limit is reproducible.
+
+Scanner modules import `fetch` and `website`, never `utils`. `utils` imports `networksearch`, so the reverse import would bring back a circular import that a test checks.
 
 Exit codes are:
 

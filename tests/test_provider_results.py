@@ -9,7 +9,7 @@ import socket
 import sys
 import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -64,11 +64,37 @@ class ProviderResultsTests(unittest.IsolatedAsyncioTestCase):
         session.get.side_effect = error
         session.get.return_value = FixtureResponse(body, status)
         scanner = TYPES[name]()
-        results = await scanner.get_report([HOST], session)
+        with patch("asyncio.sleep", new=AsyncMock()):
+            results = await scanner.get_report([HOST], session)
         result, = results
         self.assertEqual((result.provider, result.domain), (name, HOST))
-        session.get.assert_called_once()
+        # A server error gets exactly one more attempt.
+        self.assertEqual(session.get.call_count, 2 if status >= 500 else 1)
         return result
+
+    async def test_server_error_is_retried_once_after_the_providers_pause(self):
+        # crt.sh publishes 5 requests per minute, RapidDNS 30: the pause keeps the retry within them.
+        for name, minimum_pause in (("crt.sh", 12), ("RapidDNS", 2)):
+            with self.subTest(provider=name):
+                session = Mock()
+                session.get.side_effect = [FixtureResponse(PRIVATE, 502), FixtureResponse(HITS[name])]
+                with patch("asyncio.sleep", new=AsyncMock()) as pause:
+                    result, = await TYPES[name]().get_report([HOST], session)
+                self.assertEqual((result.state, result.values), ("hits", {CHILD}))
+                self.assertEqual(session.get.call_count, 2)
+                self.assertGreaterEqual(pause.await_args.args[0], minimum_pause)
+
+    async def test_client_errors_are_not_retried(self):
+        for name in TYPES:
+            for status in (403, 404, 429):
+                with self.subTest(provider=name, status=status):
+                    session = Mock()
+                    session.get.return_value = FixtureResponse(PRIVATE, status)
+                    with patch("asyncio.sleep", new=AsyncMock()) as pause:
+                        result, = await TYPES[name]().get_report([HOST], session)
+                    self.assertEqual(result.reason, f"HTTP {status}")
+                    session.get.assert_called_once()
+                    pause.assert_not_awaited()
 
     async def test_hits_and_confirmed_empty_for_all_providers(self):
         for name in TYPES:
@@ -172,8 +198,7 @@ class ProviderCliTests(unittest.TestCase):
 
                 fetch = stack.enter_context(patch.object(aiohttp.ClientSession, "get", side_effect=request))
                 utils = CLI["utils"]
-                for attr, value in (("get_workers", 1), ("configure_platform_settings", None),
-                                    ("calculate_optimal_chunk_size", 1)):
+                for attr, value in (("get_workers", 1), ("configure_platform_settings", None)):
                     stack.enter_context(patch.object(utils, attr, return_value=value))
                 hosts = []
                 def links(args):
@@ -183,8 +208,8 @@ class ProviderCliTests(unittest.TestCase):
                     "ManageFiles": files, "time": Mock(perf_counter=time.perf_counter),
                     "parse_arguments": lambda: Mock(limit=5),
                     "create_pool": ThreadPool, "process_chunks_for_internallinks": links,
-                    "process_chunks_for_networksearch": lambda _: ([], set()),
-                    "process_chunks_for_credentialsearch": lambda _: [],
+                    "process_chunks_for_networksearch": lambda _: ([], set(), {}),
+                    "process_chunks_for_credentialsearch": lambda _: ([], {}),
                 }))
                 console = io.StringIO()
                 stack.enter_context(redirect_stdout(console))

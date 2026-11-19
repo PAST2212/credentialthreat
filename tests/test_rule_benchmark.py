@@ -6,11 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 from credential_corpus import PAGES, RULES
 from measure_rules import Scanner, measure, observations, print_score
+from http_doubles import response
 
 
 async def worker_findings(scanner, page):
     request = MagicMock()
-    request.__aenter__.return_value = Mock(status=200, text=AsyncMock(return_value=page.html))
+    request.__aenter__.return_value = response(200, page.html)
     url = "https://fixture.invalid/" + page.name
     result = await scanner._get_request((url, url), {}, Mock(get=Mock(return_value=request)))
     return result[2] if result else []

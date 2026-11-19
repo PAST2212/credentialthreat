@@ -1,0 +1,188 @@
+import asyncio
+from collections import Counter
+import unittest
+from unittest.mock import AsyncMock, MagicMock, Mock
+
+import aiohttp
+
+from credentialthreat.core.fetch import HostPacer, fetch_text
+from http_doubles import FakeClock, response, session_returning
+
+
+SCOPE = ["example.com"]
+PAGE = "https://www.example.com/"
+
+
+class HostPacerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_throttling_pauses_every_request_to_that_host_only(self):
+        clock = FakeClock()
+        pacer = HostPacer(rate=10, clock=clock.now, sleep=clock.sleep)
+        await pacer.wait("a.example.com")
+        pacer.throttled("a.example.com", 2.0)
+        await pacer.wait("b.example.com")
+        self.assertEqual(clock.slept, [])
+        await pacer.wait("a.example.com")
+        self.assertEqual(clock.slept, [2.0])
+
+    async def test_rate_halves_when_throttled_and_never_recovers_beyond_the_start(self):
+        clock = FakeClock()
+        pacer = HostPacer(rate=8, clock=clock.now, sleep=clock.sleep)
+        pacer.throttled("a.example.com", 0)
+        pacer.throttled("a.example.com", 0)
+        await pacer.wait("a.example.com")
+        await pacer.wait("a.example.com")
+        self.assertEqual(clock.slept, [0.5])  # 2 requests per second after two halvings
+        for _ in range(1000):
+            pacer.succeeded("a.example.com")
+        clock.slept.clear()
+        await pacer.wait("a.example.com")
+        await pacer.wait("a.example.com")
+        self.assertEqual(clock.slept, [0.5, 0.125])  # back at 8 per second, not faster
+
+    async def test_requests_beyond_the_host_share_wait_outside_the_http_client(self):
+        # aiohttp counts time spent waiting for a pooled connection against the request timeout.
+        pacer = HostPacer(rate=1000, connections=1)
+        release = asyncio.Event()
+        sent = []
+
+        def get(url, **kwargs):
+            sent.append(url.rsplit("/", 1)[1])
+
+            async def enter(*args):
+                if url.endswith("/slow"):
+                    await release.wait()
+                return response(200, "ok")
+            manager = MagicMock()
+            manager.__aenter__.side_effect = enter
+            return manager
+
+        session = Mock(get=get)
+        first = asyncio.create_task(fetch_text(session, PAGE + "slow", {}, scope=SCOPE, pacer=pacer))
+        second = asyncio.create_task(fetch_text(session, PAGE + "next", {}, scope=SCOPE, pacer=pacer))
+        await asyncio.sleep(0.05)
+        self.assertEqual(sent, ["slow"])
+        release.set()
+        await asyncio.gather(first, second)
+        self.assertEqual(sent, ["slow", "next"])
+
+    async def test_throttled_fetch_pauses_the_host_before_retrying(self):
+        clock = FakeClock()
+        pacer = HostPacer(rate=1000, clock=clock.now, sleep=clock.sleep)
+        sent_at = []
+        replies = iter([response(429, "", {"Retry-After": "3"}), response(200, "ok")])
+
+        def get(url, **kwargs):
+            sent_at.append(clock.now())
+            manager = MagicMock()
+            manager.__aenter__.return_value = next(replies)
+            return manager
+
+        page = await fetch_text(Mock(get=get), PAGE, {}, scope=SCOPE, pacer=pacer, sleep=clock.sleep)
+        self.assertEqual(page.text, "ok")
+        self.assertGreaterEqual(sent_at[1] - sent_at[0], 3.0)
+
+
+class FetchTests(unittest.IsolatedAsyncioTestCase):
+    async def fetch(self, session, url=PAGE, scope=SCOPE, **kwargs):
+        self.sleep = AsyncMock()
+        self.outcomes = Counter()
+        return await fetch_text(session, url, {}, scope=scope, outcomes=self.outcomes, sleep=self.sleep, **kwargs)
+
+    def requested(self, session):
+        return [call.args[0] for call in session.get.call_args_list]
+
+    async def test_throttled_request_is_retried_after_the_announced_delay(self):
+        session = session_returning(response(429, "slow down", {"Retry-After": "2"}), response(200, "<html>ok</html>"))
+        page = await self.fetch(session)
+        self.assertEqual((page.url, page.text), (PAGE, "<html>ok</html>"))
+        self.sleep.assert_awaited_once_with(2.0)
+        self.assertEqual(self.outcomes, Counter({"ok": 1}))
+
+    async def test_persistent_throttling_is_counted_and_never_parsed(self):
+        replies = [response(429, "slow down") for _ in range(3)]
+        session = session_returning(*replies)
+        self.assertIsNone(await self.fetch(session))
+        self.assertEqual(session.get.call_count, 3)
+        self.assertEqual(self.outcomes, Counter({"HTTP 429": 1}))
+        self.assertEqual([reply.content.reads for reply in replies], [0, 0, 0])
+
+    async def test_unavailable_service_is_retried_and_long_delays_are_capped(self):
+        session = session_returning(response(503, "", {"Retry-After": "3600"}), response(200, "ok"))
+        page = await self.fetch(session)
+        self.assertEqual(page.text, "ok")
+        self.sleep.assert_awaited_once_with(30.0)
+
+    async def test_read_timeout_is_retried(self):
+        session = session_returning(asyncio.TimeoutError(), response(200, "ok"))
+        self.assertEqual((await self.fetch(session)).text, "ok")
+        self.assertEqual(session.get.call_count, 2)
+
+    async def test_unreachable_host_is_not_retried(self):
+        for error in (aiohttp.ConnectionTimeoutError(), aiohttp.ClientConnectorError(Mock(), OSError("refused"))):
+            with self.subTest(error=type(error).__name__):
+                session = session_returning(error)
+                self.assertIsNone(await self.fetch(session))
+                self.assertEqual(session.get.call_count, 1)
+                self.assertEqual(sum(self.outcomes.values()), 1)
+                self.assertNotIn("ok", self.outcomes)
+
+    async def test_in_scope_redirects_are_followed_to_the_final_page(self):
+        session = session_returning(
+            response(302, "", {"Location": "https://www.example.com/"}),
+            response(301, "", {"Location": "/de/"}),
+            response(200, "<html>de</html>"),
+        )
+        page = await self.fetch(session, url="https://example.com/")
+        self.assertEqual((page.url, page.text), ("https://www.example.com/de/", "<html>de</html>"))
+        self.assertEqual(self.requested(session),
+                         ["https://example.com/", "https://www.example.com/", "https://www.example.com/de/"])
+        self.assertTrue(all(call.kwargs["allow_redirects"] is False for call in session.get.call_args_list))
+
+    async def test_out_of_scope_redirect_is_never_requested(self):
+        for location in ("https://example.com.evil.invalid/", "https://other.invalid/x", "mailto:a@example.com"):
+            with self.subTest(location=location):
+                redirect = response(302, "unused", {"Location": location})
+                session = session_returning(redirect)
+                self.assertIsNone(await self.fetch(session))
+                self.assertEqual(self.requested(session), [PAGE])
+                self.assertEqual(redirect.content.reads, 0)
+                self.assertEqual(self.outcomes, Counter({"redirect skipped": 1}))
+
+    async def test_without_a_scope_no_redirect_is_followed(self):
+        session = session_returning(response(301, "", {"Location": "/de/"}))
+        self.assertIsNone(await self.fetch(session, scope=()))
+        self.assertEqual(session.get.call_count, 1)
+
+    async def test_redirect_chain_is_bounded(self):
+        session = session_returning(*[response(302, "", {"Location": f"/hop/{i}"}) for i in range(10)])
+        self.assertIsNone(await self.fetch(session))
+        self.assertEqual(session.get.call_count, 4)
+        self.assertEqual(self.outcomes, Counter({"too many redirects": 1}))
+
+    async def test_binary_content_type_is_not_downloaded(self):
+        for content_type in ("image/png", "application/pdf", "video/mp4", "font/woff2", "application/octet-stream"):
+            with self.subTest(content_type=content_type):
+                binary = response(200, b"\x89PNG" * 1000, {"Content-Type": content_type})
+                self.assertIsNone(await self.fetch(session_returning(binary)))
+                self.assertEqual(binary.content.reads, 0)
+                self.assertEqual(self.outcomes, Counter({"binary": 1}))
+
+    async def test_text_content_types_are_read(self):
+        for content_type in ("text/html; charset=utf-8", "application/javascript", "application/json", "image/svg+xml", ""):
+            with self.subTest(content_type=content_type):
+                page = await self.fetch(session_returning(response(200, "var a = 1;", {"Content-Type": content_type})))
+                self.assertEqual(page.text, "var a = 1;")
+
+    async def test_body_is_cut_at_the_size_limit(self):
+        body = "a" * 5000
+        page = await self.fetch(session_returning(response(200, body)), max_bytes=1000)
+        self.assertEqual(len(page.text), 1000)
+        self.assertEqual(self.outcomes, Counter({"truncated": 1}))
+
+    async def test_error_status_bodies_are_still_returned_for_scanning(self):
+        page = await self.fetch(session_returning(response(500, "debug trace")))
+        self.assertEqual((page.status, page.text), (500, "debug trace"))
+
+
+if __name__ == "__main__":
+    unittest.main()

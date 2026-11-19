@@ -2,10 +2,10 @@ import time
 import http.cookies
 import multiprocessing
 import logging
-import math
 import asyncio
 import argparse
 import sys
+from collections import Counter
 from functools import partial
 from colorama import Fore, Style
 from credentialthreat.core.files import ManageFiles
@@ -18,7 +18,7 @@ from credentialthreat.core.credentialsearch import ScanerCredentials
 from credentialthreat.core import utils
 from credentialthreat.core.utils import UrlPrioritizer
 from credentialthreat.core.interrupt_handler import GracefulKiller, ScanInterrupted, create_pool
-from credentialthreat.core.website import SUFFIXES, dns_name, host_in_scope, url_in_scope
+from credentialthreat.core.website import SUFFIXES, canonical_url, dns_name, host_in_scope, is_binary_url, url_in_scope
 
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -30,18 +30,20 @@ DISCOVERY_LIMITS = (
 )
 
 
-def process_chunks_for_credentialsearch(network_files_chunk: list[tuple[str, str]]):
+def process_chunks_for_credentialsearch(arg):
     """Function that runs in each process"""
+    network_files_chunk, domains, host_connections = arg
     # Run async code in a new event loop
-    return asyncio.run(ScanerCredentials().get_results(network_files_chunk))
+    return asyncio.run(ScanerCredentials(scope=domains, host_connections=host_connections).get_results(network_files_chunk))
 
 
 def process_chunks_for_networksearch(arg):
     """Function that runs in each process"""
     try:
-        networkpoints, domains_input, tld_extract = arg
+        networkpoints, domains_input, tld_extract, host_connections = arg
         # Run async code in a new event loop
-        return asyncio.run(ScanerNetworkResources().get_results(networkpoints, domains_input, tld_extract))
+        scanner = ScanerNetworkResources(scope=domains_input, host_connections=host_connections)
+        return asyncio.run(scanner.get_results(networkpoints, domains_input, tld_extract))
     except (KeyboardInterrupt, SystemExit) as error:
         # A BaseException would kill the worker without resolving its pool result.
         raise RuntimeError("Network worker interrupted") from error
@@ -49,9 +51,9 @@ def process_chunks_for_networksearch(arg):
 
 def process_chunks_for_internallinks(arg):
     """Function that runs in each process"""
-    fqdns, tld_extract = arg
+    fqdns, tld_extract, domains, host_connections = arg
     # Run async code in a new event loop
-    return asyncio.run(ScanerInternalLinks().get_results(fqdns, tld_extract))
+    return asyncio.run(ScanerInternalLinks(scope=domains, host_connections=host_connections).get_results(fqdns, tld_extract))
 
 
 def parse_arguments():
@@ -89,6 +91,16 @@ def main():
         return 1
 
 
+def _log_outcomes(stage: str, outcomes: Counter) -> None:
+    """One line per stage: URLs read, and why the others were skipped (WARNING if any were)."""
+    read = outcomes["ok"] + outcomes["truncated"]
+    skipped = {key: count for key, count in outcomes.items() if key not in ("ok", "truncated") and count}
+    detail = ", ".join(f"{key}={count}" for key, count in sorted(skipped.items()))
+    logging.log(logging.WARNING if skipped else logging.INFO, "%s requests: ok=%d%s, skipped=%d%s",
+                stage, read, f" (truncated={outcomes['truncated']})" if outcomes["truncated"] else "",
+                sum(skipped.values()), f" ({detail})" if detail else "")
+
+
 def _write_scan_report(leaks, status):
     candidates = sum(len(matches) for _, _, matches in leaks)
     logging.info("Unverified credential matches: %d (affected resources: %d)", candidates, len(leaks))
@@ -122,6 +134,8 @@ def _run_scan(killer):
             time.sleep(0.1)
 
         num_processes = utils.get_workers()
+        # The workers share one connection budget per host, so the load on a host does not grow with the CPU count.
+        host_connections = utils.host_connections_per_worker(num_processes)
 
         utils.configure_platform_settings()
 
@@ -147,31 +161,26 @@ def _run_scan(killer):
             logging.error("Error during subdomain scanning (%s)", type(e).__name__)
             return 1
 
-        fqdn = subdomains + domains
-        size_chunk_fqdn = math.ceil(len(fqdn) / num_processes)
-        if size_chunk_fqdn > len(fqdn):
-            process_chunks = [(fqdn, SUFFIXES)]
-        else:
-            process_chunks = [(fqdn[i:i + size_chunk_fqdn], SUFFIXES) for i in range(0, len(fqdn), size_chunk_fqdn)]
+        fqdn = list(dict.fromkeys(host for host in map(dns_name, subdomains + domains) if host))
+        process_chunks = [(chunk, SUFFIXES, domains, host_connections) for chunk in utils.plan_chunks(fqdn, num_processes)]
         total_chunks = len(process_chunks)
 
         worker = partial(process_chunks_for_internallinks)
 
         internal_links: set[str] = set()
-        internal_links_blacklist: set[str] = set()
+        link_outcomes: Counter = Counter()
         completed_chunks = 0
 
         logging.info(FY + f"\nStarting Internal URL Scan: "
                           f"\n├── Total Full Qualified Domain Name: {len(fqdn):,}"
-                          f"\n├── {f"Optimal Chunk Size: {size_chunk_fqdn:,}" if size_chunk_fqdn <= len(fqdn) else f"Optimal Chunk Size: {len(fqdn)}"}"
                           f"\n├── Total Chunks: {total_chunks}"
                           f"\n└── CPU Cores: {num_processes}\n" + S)
         try:
             with killer.defer_pool_signals(), create_pool(processes=num_processes) as pool:
                 for chunk_result in killer.pool_results(pool, worker, process_chunks):
-                    internal_urls, blacklist = chunk_result
+                    internal_urls, outcomes = chunk_result
                     internal_links.update(internal_urls)
-                    internal_links_blacklist.update(blacklist)
+                    link_outcomes.update(outcomes)
                     completed_chunks += 1
                     logging.info(FG + f"Chunk {completed_chunks}/{total_chunks} completed: {len(internal_urls)} Internal URLs found\n" + S)
 
@@ -181,45 +190,40 @@ def _run_scan(killer):
         except Exception as e:
             logging.error("Error during internal URL scanning (%s)", type(e).__name__)
             return 1
+        _log_outcomes("Internal URL scan", link_outcomes)
 
-        fqdn_normalized = [item for item in fqdn if item not in internal_links_blacklist]
-        internal_links_normalized = [url for url in internal_links if url and url_in_scope(url, domains)]
-        internal_links_normalized = utils.remove_byte_content_urls(internal_links_normalized)
-        logging.info(f'{len(internal_links_normalized)} Internal URLs were found for {len(fqdn_normalized)} Normalized Fully Qualified Domain Names')
-
-        host_names = internal_links_normalized + fqdn_normalized
-        host_names_normalized = list(filter(lambda item: item is not None and not '', list(set(host_names))))
-        logging.info(f'{len(host_names_normalized)} Normalized Host Names were found in total')
+        # Sorted, so that a URL limit keeps the same pages on every run.
+        host_names_normalized = sorted({url for url in map(canonical_url, internal_links)
+                                        if url and url_in_scope(url, domains) and not is_binary_url(url)})
+        logging.info(f'{len(host_names_normalized)} Internal URLs were found for {len(fqdn)} Fully Qualified Domain Names')
         host_names_scaled = UrlPrioritizer().prioritize_urls(urls=host_names_normalized, limit=url_limit)
         logging.info(FG + "End Internal URL Scan\n" + S)
         if not host_names_scaled:
             return _write_scan_report([], status)
 
-        optimal_chunk_size = utils.calculate_optimal_chunk_size(sample_urls=host_names_scaled[:100], domains_input=domains, tld_extract=SUFFIXES)
-        if optimal_chunk_size > len(host_names_scaled):
-            process_chunks = [(host_names_scaled, domains, SUFFIXES)]
-        else:
-            process_chunks = [(host_names_scaled[i:i + optimal_chunk_size], domains, SUFFIXES) for i in range(0, len(host_names_scaled), optimal_chunk_size)]
+        process_chunks = [(chunk, domains, SUFFIXES, host_connections)
+                          for chunk in utils.plan_chunks(host_names_scaled, num_processes)]
         total_chunks = len(process_chunks)
 
         worker = partial(process_chunks_for_networksearch)
 
         network_files_whitelist = []
         network_files_blacklist: set = set()
+        page_outcomes: Counter = Counter()
         completed_chunks = 0
 
         start1 = time.perf_counter()
         logging.info(FY + f"\nStarting Network Resource Scan:"
                           f"\n├── Total URLs: {len(host_names_scaled):,}"
-                          f"\n├── {f"Optimal Chunk Size: {optimal_chunk_size:,}" if optimal_chunk_size <= len(host_names_scaled) else f"Optimal Chunk Size: {len(host_names_scaled)}"}"
                           f"\n├── Total Chunks: {total_chunks}"
                           f"\n└── CPU Cores: {num_processes}\n" + S)
         try:
             with killer.defer_pool_signals(), create_pool(processes=num_processes) as pool:
                 for chunk_result in killer.pool_results(pool, worker, process_chunks):
-                    network_f_whitelist, network_f_blacklist = chunk_result
+                    network_f_whitelist, network_f_blacklist, outcomes = chunk_result
                     network_files_whitelist.extend(network_f_whitelist)
                     network_files_blacklist.update(network_f_blacklist)
+                    page_outcomes.update(outcomes)
                     completed_chunks += 1
                     logging.info(FG + f"Chunk {completed_chunks}/{total_chunks} completed: {len(network_f_whitelist)} Network URLs found\n" + S)
 
@@ -229,6 +233,7 @@ def _run_scan(killer):
         except Exception as e:
             logging.error("Error during network scanning (%s)", type(e).__name__)
             return 1
+        _log_outcomes("Network resource scan", page_outcomes)
 
         network_files_whitelist = list({obj.script_url: obj for obj in reversed(network_files_whitelist)}.values())
         network_files_normalized = utils.deduplicate_script_urls(whitelist=network_files_whitelist, blacklist=list(network_files_blacklist))
@@ -242,29 +247,26 @@ def _run_scan(killer):
 
         if not network_files_scaled:
             return _write_scan_report([], status)
-        optimal_chunk_size = utils.calculate_optimal_chunk_size(network_files_scaled[:100])
-        if optimal_chunk_size > len(network_files_scaled):
-            process_chunks = [network_files_scaled]
-        else:
-            process_chunks = [network_files_scaled[i:i + optimal_chunk_size] for i in range(0, len(network_files_scaled), optimal_chunk_size)]
+        process_chunks = [(chunk, domains, host_connections) for chunk in utils.plan_chunks(network_files_scaled, num_processes)]
         total_chunks = len(process_chunks)
 
         worker = partial(process_chunks_for_credentialsearch)
 
         leaks = []
+        resource_outcomes: Counter = Counter()
         completed_chunks = 0
 
         start2 = time.perf_counter()
         logging.info(FY + f"\nStarting Credential Scan:"
                           f"\n├── Total URLs: {len(network_files_scaled):,}"
-                          f"\n├── {f"Optimal Chunk Size: {optimal_chunk_size:,}" if optimal_chunk_size <= len(network_files_scaled) else f"Optimal Chunk Size: {len(network_files_scaled)}"}"
                           f"\n├── Total Chunks: {total_chunks}"
                           f"\n└── CPU Cores: {num_processes}\n" + S)
         try:
             with killer.defer_pool_signals(), create_pool(processes=num_processes) as pool:
                 for chunk_result in killer.pool_results(pool, worker, process_chunks):
-                    found_leaks = chunk_result
+                    found_leaks, outcomes = chunk_result
                     leaks.extend(found_leaks)
+                    resource_outcomes.update(outcomes)
                     completed_chunks += 1
                     logging.info(FG + f"Chunk {completed_chunks}/{total_chunks} completed: {len(found_leaks)} resources with candidates\n" + S)
 
@@ -274,6 +276,7 @@ def _run_scan(killer):
         except Exception as e:
             logging.error("Error during credential scanning (%s)", type(e).__name__)
             return 1
+        _log_outcomes("Credential scan", resource_outcomes)
 
         end2 = time.perf_counter()
         logging.info(FG + f"End Credential Leak Candidates Scan: {end2 - start2:.2f} Seconds needed\n" + S)

@@ -10,6 +10,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from bs4 import BeautifulSoup
 
+from http_doubles import response as http_response
+
 
 CLI = runpy.run_path(str(Path(__file__).resolve().parents[1] / "credentialthreat.py"))
 SITE = "https://docs.example.com"
@@ -17,7 +19,7 @@ PSL = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_pri
 
 
 def session_returning(status, body, headers=None):
-    response = Mock(status=status, headers=headers or {}, text=AsyncMock(return_value=body))
+    response = http_response(status, body, headers)
     manager = MagicMock()
     manager.__aenter__.return_value = response
     return Mock(get=Mock(return_value=manager)), response
@@ -39,7 +41,7 @@ class WebsiteSafetyTests(unittest.IsolatedAsyncioTestCase):
                     result = await scanner._get_request(arg, {}, session)
                     self.assertIsNone(result)
                     self.assertIs(session.get.call_args.kwargs["allow_redirects"], False)
-                    response.text.assert_not_awaited()
+                    self.assertEqual(response.content.reads, 0)
                     session.get.assert_called_once()
 
     async def test_certificate_failure_does_not_trigger_an_insecure_retry(self):
@@ -50,7 +52,7 @@ class WebsiteSafetyTests(unittest.IsolatedAsyncioTestCase):
                     Mock(), ssl.CertificateError("synthetic certificate mismatch"))
                 self.assertIsNone(await scanner._get_request(arg, {}, session))
                 session.get.assert_called_once()
-                response.text.assert_not_awaited()
+                self.assertEqual(response.content.reads, 0)
 
     async def test_each_website_session_verifies_the_server_certificate(self):
         real_session = aiohttp.ClientSession
@@ -74,6 +76,25 @@ class WebsiteSafetyTests(unittest.IsolatedAsyncioTestCase):
         for context in contexts:
             self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
             self.assertTrue(context.check_hostname)
+
+    async def test_each_website_session_limits_connections_per_host_to_the_worker_share(self):
+        real_session = aiohttp.ClientSession
+        limits = []
+
+        def record_session(**kwargs):
+            session = real_session(**kwargs)
+            limits.append(session.connector.limit_per_host)
+            return session
+
+        scans = [
+            CLI["ScanerInternalLinks"](host_connections=5).process_internal_links([], PSL),
+            CLI["ScanerNetworkResources"](host_connections=5).process_network_sources([], ["example.com"], PSL),
+            CLI["ScanerCredentials"](host_connections=5).process_credentials([]),
+        ]
+        with patch.object(aiohttp, "ClientSession", side_effect=record_session):
+            for scan in scans:
+                await scan
+        self.assertEqual(limits, [5, 5, 5])
 
     async def test_redirect_destination_receives_zero_requests_over_loopback(self):
         arrivals = []
@@ -163,6 +184,6 @@ class WebsiteSafetyTests(unittest.IsolatedAsyncioTestCase):
         html = """<script src="/local.js"></script>
         <script src="https://example.com.other.invalid/bad.js"></script>
         <script>require("https://elsewhere.invalid/other.js")</script>"""
-        with patch.object(scanner, "_get_request", new=AsyncMock(return_value=BeautifulSoup(html, "html.parser"))):
+        with patch.object(scanner, "_get_request", new=AsyncMock(return_value=(SITE, BeautifulSoup(html, "html.parser")))):
             found = await scanner._fetch_network_sources(SITE, ["example.com"], PSL, {}, Mock())
         self.assertEqual({item.script_url for item in found}, {SITE, SITE + "/local.js"})

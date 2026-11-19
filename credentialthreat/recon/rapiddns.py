@@ -8,6 +8,7 @@ from credentialthreat.core.website import host_in_scope
 
 class ScanerRapidDns(SubdomainProvider):
     name = "RapidDNS"
+    retry_pause = 5.0  # published limit: 30 requests per minute
 
     @staticmethod
     async def _scrape_subdomains(session: aiohttp.ClientSession, domain: str) -> tuple[int, set[str]]:

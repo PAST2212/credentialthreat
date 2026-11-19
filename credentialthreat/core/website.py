@@ -69,6 +69,36 @@ def url_in_scope(value: str, domains: list[str]) -> bool:
         return False
 
 
+BINARY_EXTENSIONS = frozenset((
+    "jpg", "png", "gif", "jpeg", "bmp", "webp", "woff2", "woff", "ico", "svg", "mp3", "mp4",
+    "mpeg", "mpg", "avi", "zip", "rar", "tar", "gz", "pdf", "ttf", "exe", "xml", "app",
+))
+
+
+def canonical_url(value: str) -> str | None:
+    """One spelling per fetchable page: http(s) only, no userinfo or fragment, '/' for an empty path."""
+    try:
+        url = URL(value)
+        if url.scheme not in ("https", "http") or url.raw_user is not None or url.raw_password is not None:
+            return None
+        host = dns_name(url.raw_host or "")
+        if not host:
+            return None
+        return str(URL.build(scheme=url.scheme, host=host, port=url.explicit_port if not url.is_default_port() else None,
+                             path=url.raw_path or "/", query_string=url.raw_query_string, encoded=True))
+    except (ValueError, UnicodeError, TypeError):
+        return None
+
+
+def is_binary_url(value: str) -> bool:
+    """True when the URL path ends in a file extension that never holds scannable text."""
+    try:
+        name = URL(value).path.rsplit("/", 1)[-1]
+    except (ValueError, UnicodeError, TypeError):
+        return False
+    return "." in name and name.rsplit(".", 1)[-1].lower() in BINARY_EXTENSIONS
+
+
 def report_origin(value: str) -> str:
     """Exclude userinfo, paths, query strings and fragments from findings."""
     try:

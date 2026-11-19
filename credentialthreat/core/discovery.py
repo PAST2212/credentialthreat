@@ -1,5 +1,6 @@
 """Outcomes of individual discovery queries; only counts and fixed diagnostics are logged."""
 
+import asyncio
 from collections import Counter
 from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass, field
@@ -77,6 +78,7 @@ def combined_values(results: Iterable[QueryResult]) -> set[str]:
 
 class SubdomainProvider:
     name: str
+    retry_pause: float = 15.0  # seconds before repeating a query that failed with a server error
 
     def __init__(self):
         self.results: set[str] = set()
@@ -84,8 +86,15 @@ class SubdomainProvider:
     async def _scrape_subdomains(self, session, domain) -> tuple[int, set[str]]:
         raise NotImplementedError
 
+    async def _query(self, session, domain) -> QueryResult:
+        result = await observe(self.name, domain, self._scrape_subdomains(session, domain))
+        if result.reason is not None and result.reason.startswith("HTTP 5"):
+            await asyncio.sleep(self.retry_pause)
+            result = await observe(self.name, domain, self._scrape_subdomains(session, domain))
+        return result
+
     async def get_report(self, domains, session) -> list[QueryResult]:
-        return [await observe(self.name, domain, self._scrape_subdomains(session, domain)) for domain in domains]
+        return [await self._query(session, domain) for domain in domains]
 
     async def get_results(self, domains, session) -> set[str]:
         self.results.update(combined_values(await self.get_report(domains, session)))
