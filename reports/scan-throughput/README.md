@@ -65,6 +65,21 @@ A resolver patch mapped every name to loopback, so no request left the machine. 
 
 The production numbers differ partly because crt.sh failed during the earlier run. The discovery retry did not trigger in the later run. That run used the code before the last change, which only moved the wait for a per-host request slot in front of the HTTP client. The number of connections to the host stayed the same, so the production scan was not repeated.
 
+### Fetching each page once
+
+A later change matches the page text in the resource stage, so the credential stage no longer fetches the pages again. Both synthetic runs were repeated with that change on the same site and machine:
+
+| Synthetic site | Pages fetched twice | Pages fetched once |
+| --- | ---: | ---: |
+| Run A elapsed | 89 s | 65 s |
+| Run A requests (repeated requests) | 9,035 (3,009) | 6,032 (6) |
+| Run B elapsed | 283 s | 223 s |
+| Run B requests / HTTP 429 responses | 9,586 / 554 | 6,500 / 469 |
+| Planted credentials found, Run A and Run B | 440 / 440 | 440 / 440 |
+| Peak RSS of the process tree | 365–366 MiB | 364–366 MiB |
+
+In Run B one resource stayed throttled after three attempts and appeared in the skip report. It carried no planted credential. The production domain was not scanned again with this change.
+
 ## Why each part is needed
 
 The intermediate runs show why the fixes depend on each other:
@@ -76,7 +91,7 @@ The intermediate runs show why the fixes depend on each other:
 
 ## Remaining limits
 
-- Pages were fetched in the resource stage and again in the credential stage. In Run A this accounted for 3,009 of 9,035 requests. A later change matches the page text in the resource stage and sends only the other resources to the credential stage, so each page is fetched once. The runs above predate that change and were not repeated.
+- Pages were fetched in the resource stage and again in the credential stage. In Run A this accounted for 3,009 of 9,035 requests. A later change matches the page text in the resource stage and sends only the other resources to the credential stage, so each page is fetched once. [Measured effect](#fetching-each-page-once)
 - Peak memory is dominated by the worker processes, at about 360–560 MiB for the process tree with five workers. Each worker holds at most 50 bodies of up to 10 MB at once.
 - The scan follows links of the start pages only and does not execute JavaScript. Scripts loaded only from other scripts are not found.
 - `--limit` applies to the pages and to the other resources separately. Since pages are no longer fetched again, they no longer count against the resource cap.
