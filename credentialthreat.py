@@ -120,7 +120,7 @@ def _next_imports(imported, requested: set, domains, budget: int) -> tuple[list[
     if len(selected) <= budget:
         return selected, 0
     # Like the first round, the limit keeps the URL patterns most likely to expose credentials.
-    kept = UrlPrioritizer().prioritize_urls(urls=selected, limit=budget) if budget else []
+    kept = UrlPrioritizer().prioritize_urls(urls=selected, limit=budget, scope=domains) if budget else []
     return kept, len(selected) - len(kept)
 
 
@@ -230,7 +230,7 @@ def _run_scan(killer):
                                         if url and url not in link_pages and url_in_scope(url, domains)
                                         and not is_binary_url(url)})
         logging.info(f'{len(host_names_normalized)} Internal URLs were found for {len(fqdn)} Fully Qualified Domain Names')
-        host_names_scaled = UrlPrioritizer().prioritize_urls(urls=host_names_normalized, limit=url_limit)
+        host_names_scaled = UrlPrioritizer().prioritize_urls(urls=host_names_normalized, limit=url_limit, scope=domains)
         logging.info(FG + "End Internal URL Scan\n" + S)
         if not host_names_scaled and not start_resources:
             return _write_scan_report(leaks, status, partial_discovery)
@@ -281,7 +281,7 @@ def _run_scan(killer):
                                     if url_in_scope(base, domains) and url_in_scope(resource, domains)]
         logging.info(f'\n{len(network_files_normalized)} Normalized Network URLs were found')
 
-        network_files_scaled = UrlPrioritizer().prioritize_urls(urls=network_files_normalized, limit=url_limit)
+        network_files_scaled = UrlPrioritizer().prioritize_urls(urls=network_files_normalized, limit=url_limit, scope=domains)
         end1 = time.perf_counter()
         logging.info(FG + f'End Network Resource Scan: {end1-start1:.2f} Seconds needed' + S)
 

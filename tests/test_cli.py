@@ -274,6 +274,48 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(), 0)
         self.assertCountEqual([resource for _, resource in seen_resources], scripts)
 
+    def test_url_limits_rank_urls_without_the_configured_domain(self):
+        # The configured domain contains the pattern `acl`. Ranked with it, every URL is high priority and a URL
+        # limit keeps the alphabetically first ones.
+        main = CLI["main"]
+        utils = CLI["utils"]
+        host = "oracle.example"
+        page = f"https://www.{host}/"
+        links = [f"https://www.{host}/a/about", f"https://www.{host}/z/admin/"]
+        resources = [f"https://www.{host}/a/app.css", f"https://www.{host}/z/secret-settings.css"]
+        seen_pages, seen_resources = [], []
+
+        def page_worker(args):
+            seen_pages.extend(args[0])
+            return [utils.ScrapNetworkUrls(page, resource) for resource in resources], set(args[0]), [], {"ok": 1}
+
+        def resource_worker(arg):
+            seen_resources.extend(resource for _, resource in arg[0])
+            return [], {}, []
+
+        with contextlib.ExitStack() as stack:
+            files_mock = Mock()
+            files_mock.return_value.get_domains.return_value = [host]
+            stack.enter_context(patch.object(utils, "get_workers", return_value=1))
+            stack.enter_context(patch.object(utils, "configure_platform_settings"))
+            stack.enter_context(patch.dict(main.__globals__, {
+                "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=1),
+                "ManageFiles": files_mock, "create_pool": ThreadPool,
+                "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
+                "process_chunks_for_internallinks": lambda args: (links, [], set(), [], {}),
+                "process_chunks_for_networksearch": page_worker,
+                "process_chunks_for_credentialsearch": resource_worker,
+            }))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertLogs(level="INFO"):
+                self.assertEqual(main(), 0)
+        self.assertEqual(seen_pages, [links[1]])
+        self.assertEqual(seen_resources, [resources[1]])
+        modules = [(page, f"https://www.{host}/a/module.js"), (page, f"https://www.{host}/z/auth-module.js")]
+        with patch("logging.info"):
+            kept, skipped = CLI["_next_imports"](modules, set(), [host], 1)
+        self.assertEqual((kept, skipped), ([modules[1]], 1))
+
     def run_with_imports(self, imports, limit):
         """Scan one page with one script; the resource worker reports `imports[resource]` for each resource."""
         main = CLI["main"]
@@ -566,7 +608,7 @@ class CliTests(unittest.TestCase):
         utils.plan_chunks.side_effect = lambda items, workers: [list(items)]
         utils.host_connections_per_worker.return_value = 2
         priorities = Mock()
-        priorities.return_value.prioritize_urls.side_effect = lambda urls, limit: urls
+        priorities.return_value.prioritize_urls.side_effect = lambda urls, limit, scope=(): urls
         with contextlib.ExitStack() as stack:
             for signum in (signal.SIGINT, signal.SIGTERM):
                 stack.callback(signal.signal, signum, signal.getsignal(signum))

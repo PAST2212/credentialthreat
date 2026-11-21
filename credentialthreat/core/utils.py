@@ -289,10 +289,23 @@ class UrlPrioritizer:
         return re.compile("|".join(f"(?:{pattern})" for pattern in patterns), re.IGNORECASE)
 
     @staticmethod
-    def _match_target(url: str) -> str:
-        return url.split("#", 1)[0].split("?", 1)[0]
+    def _match_target(url: str, scope=()) -> str:
+        """The URL without query string or fragment, and without the configured domain in its host name.
 
-    def prioritize_urls(self, urls: Union[list[tuple[str, str]], list[str]], limit: int) -> Union[list[tuple[str, str]], list[str]]:
+        The configured domain is in every URL of a scan, so a pattern it contains (`amazon` in amazon.com, `acl`
+        in oracle.com) would rank every URL high and leave a URL limit to the alphabet.
+        """
+        target = url.split("#", 1)[0].split("?", 1)[0]
+        scheme, separator, rest = target.partition("://")
+        authority, slash, path = rest.partition("/")
+        host, colon, port = authority.partition(":")
+        for root in sorted(scope, key=len, reverse=True):
+            if root and (host == root or host.endswith("." + root)):
+                host = host[:-len(root)]
+                break
+        return f"{scheme}{separator}{host}{colon}{port}{slash}{path}"
+
+    def prioritize_urls(self, urls: Union[list[tuple[str, str]], list[str]], limit: int, scope=()) -> Union[list[tuple[str, str]], list[str]]:
         """Prioritize network and internal URLs based on likelihood of credential exposure."""
 
         FG, BT, FR, FY, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Fore.YELLOW, Style.RESET_ALL
@@ -325,7 +338,7 @@ class UrlPrioritizer:
                 if url in seen_urls:
                     continue
                 seen_urls.add(url)
-                if internal_match.search(self._match_target(url)):
+                if internal_match.search(self._match_target(url, scope)):
                     high_priority.append(url)
                 else:
                     low_priority.append(url)
@@ -336,7 +349,7 @@ class UrlPrioritizer:
                 if script_url in seen_urls:
                     continue
                 seen_urls.add(script_url)
-                target = self._match_target(script_url)
+                target = self._match_target(script_url, scope)
                 if high_match.search(target):
                     high_priority.append(url_obj)
                 elif medium_match.search(target):

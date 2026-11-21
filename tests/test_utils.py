@@ -22,6 +22,18 @@ class PrioritizerTests(unittest.TestCase):
                      ("https://h.example.com/", "https://h.example.com/elasticsearch.css")]
         self.assertEqual(pick(resources, 1), [resources[1]])
 
+    def test_the_scanned_domain_itself_does_not_raise_a_url_priority(self):
+        # Patterns such as `amazon` or `acl` matched the configured domain (amazon.com, oracle.com), so every URL
+        # of such a scan ranked high and a URL limit kept them in alphabetical order.
+        for domain in ("amazon.com", "oracle.com"):
+            with self.subTest(domain=domain), patch("logging.info"):
+                page = f"https://www.{domain}/"
+                resources = [(page, f"https://www.{domain}/a/app.css"), (page, f"https://www.{domain}/z/secret-settings.css")]
+                selected = utils.UrlPrioritizer().prioritize_urls(resources, limit=1, scope=[domain])
+                self.assertEqual(selected, [resources[1]])
+                pages = [f"https://www.{domain}/a/about", f"https://www.{domain}/z/admin/"]
+                self.assertEqual(utils.UrlPrioritizer().prioritize_urls(pages, limit=1, scope=[domain]), [pages[1]])
+
     def test_selection_under_a_limit_does_not_depend_on_input_order(self):
         urls = [f"https://www.example.com/p/{i}" for i in range(6)]
         self.assertEqual(pick(urls, 3), pick(list(reversed(urls)), 3))
