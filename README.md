@@ -27,7 +27,7 @@ Find leaked credentials and sensitive data (e.g., tokens, API keys) based on URL
 
    
 ### CSV Output
-The CLI creates `Credential_Leak_Candidates_Redacted_YYYY-MM-DD.csv` in `credentialthreat/data/output/`. Each semicolon-delimited row represents a matched value at one text position in a resource. The four columns contain the page origin, resource origin, registered domain of the page, and matched categories. Rules matching exactly the same span share a row, for example `Unverified api_key + aws_keys [REDACTED]`. Repeated values at different positions get separate rows. Existing rows in a daily report keep their original counts.
+The CLI creates `Credential_Leak_Candidates_Redacted_YYYY-MM-DD.csv` in `credentialthreat/data/output/`. Each semicolon-delimited row represents a matched value in a resource. The four columns contain the page origin, resource origin, registered domain of the page, and matched categories. Rules matching exactly the same span share a row, for example `Unverified api_key + aws_keys [REDACTED]`. A value that occurs several times in one resource gets one row, because the redacted rows would otherwise be identical: one production page carried the same signed link parameter in 151 links. Existing rows in a daily report keep their original counts.
 
 Reports identify origins by scheme, host and port. Paths, URL credentials, queries, fragments and matched values are omitted. The console summarizes targets by count. Discovery errors identify the provider or stage, exception type and HTTP status when available. Older reports can contain raw values and keep their original filenames.
 

@@ -208,14 +208,15 @@ class WebsiteSafetyTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertIsNone(result)
 
-    async def test_two_rules_on_one_value_count_once_per_text_position(self):
+    async def test_two_rules_on_one_value_count_once_per_value(self):
+        # Rules that match the same value merge into one label; a repeated value adds no further identical row.
         value = "AKIA" + "TEST" * 4
         scanner = CLI["ScanerCredentials"]()
         for occurrences in (1, 2):
             with self.subTest(occurrences=occurrences):
                 session, _ = session_returning(200, f'api_key = "{value}";\n' * occurrences)
                 result = await scanner._get_request((SITE, SITE), {}, session)
-                self.assertEqual(result, (SITE, SITE, [("api_key + aws_keys", "[REDACTED]")] * occurrences))
+                self.assertEqual(result, (SITE, SITE, [("api_key + aws_keys", "[REDACTED]")]))
 
     async def test_one_rule_can_still_report_multiple_distinct_values(self):
         session, _ = session_returning(200, 'api_key = "FIXTUREONE"; api_key = "FIXTURETWO";')

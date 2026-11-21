@@ -38,7 +38,9 @@ class BenchmarkTests(unittest.IsolatedAsyncioTestCase):
                 grouped = {}
                 for _, span, label in observations(scanner, page):
                     grouped.setdefault(span, {})[label] = None
-                expected = [(" + ".join(labels), "[REDACTED]") for labels in grouped.values()]
+                # The worker reports each value once per text, under the labels of its position.
+                distinct = {(" + ".join(labels), page.html[slice(*span)]) for span, labels in grouped.items()}
+                expected = [(label, "[REDACTED]") for label, _ in distinct]
                 self.assertCountEqual(await worker_findings(scanner, page), expected)
 
     def test_corpus_has_unique_names_and_unambiguous_target_spans(self):

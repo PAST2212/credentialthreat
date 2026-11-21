@@ -157,6 +157,20 @@ class MatcherTests(unittest.TestCase):
             with self.subTest(sample=sample):
                 self.assertEqual(scanner._findings(sample), [(label, "[REDACTED]")])
 
+    def test_a_value_repeated_in_one_text_is_reported_once(self):
+        # A production page carried one signed link parameter in 151 links. The report redacts values, so the
+        # 151 matches became 151 identical rows; a scan of 17,000 pages wrote 20,349 rows for a few values.
+        scanner = ScanerCredentials()
+        token = "eyJhbGciOiJGSVhUVVJFIn0.eyJ0ZXN0Ijp0cnVlfQ.RklYVFVSRQ"
+        links = "".join(f'<a href="/item/{n}?t={token}">item</a>' for n in range(151))
+        self.assertEqual(scanner._findings(links), [("jwt", "[REDACTED]")])
+        # Different values, or the same value under a different rule, stay separate.
+        other = token.replace("RklYVFVSRQ", "T1RIRVJGSVhUVVJF")
+        self.assertEqual(scanner._findings(links + f'<a href="/x?t={other}">x</a>'), [("jwt", "[REDACTED]")] * 2)
+        self.assertCountEqual(scanner._findings('api_key = "FIXTUREONLY123"; auth_token = "FIXTUREONLY123"; '
+                                                'api_key = "FIXTUREONLY123"'),
+                              [("api_key", "[REDACTED]"), ("auth_token", "[REDACTED]")])
+
     def test_assignment_rule_does_not_scan_text_case_insensitively(self):
         # Case-insensitive matching of the field-name alternation costs about 1.5 s per MB of script
         # and blocks the worker's event loop meanwhile. Compare on this machine, not against a fixed time.

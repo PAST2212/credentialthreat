@@ -147,7 +147,9 @@ class ScanerCredentials:
                 labels = labels_by_span.setdefault(match.span(), [])
                 if pattern_name not in labels:
                     labels.append(pattern_name)
-        return [(" + ".join(labels), "[REDACTED]") for labels in labels_by_span.values()]
+        # The report redacts values, so each further occurrence of a value would only add an identical row.
+        distinct = {(" + ".join(labels), data[slice(*span)]): None for span, labels in labels_by_span.items()}
+        return [(label, "[REDACTED]") for label, _ in distinct]
 
     async def _get_request(self, url_tuple: tuple[str, str], header, session: aiohttp.ClientSession) -> Union[None, tuple[str, str, list[tuple]]]:
         origin_url, script_url = url_tuple
