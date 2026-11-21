@@ -106,6 +106,15 @@ class MatcherTests(unittest.TestCase):
         self.assertLess(min(non_ascii_times), min(ascii_times) * 1.2,
                         f"non-ASCII {min(non_ascii_times):.3f}s, ASCII {min(ascii_times):.3f}s")
 
+    def test_cors_credentials_keyword_is_not_a_candidate(self):
+        # `use-credentials` is the CORS mode of crossorigin attributes; one production script assigned it to withCredentials.
+        scanner = ScanerCredentials()
+        for sample in ('e.withCredentials="use-credentials"', "credentials: 'use-credentials'", 'CREDENTIALS = "USE-CREDENTIALS"'):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [])
+                self.assertEqual(case_insensitive_findings(scanner, sample), [])
+        self.assertEqual(scanner._findings('credentials = "use-credentials-FIXTURE"'), [("credentials", "[REDACTED]")])
+
     def test_access_key_id_of_a_presigned_url_is_not_a_candidate(self):
         # A presigned S3 URL is made to be handed out, and carries its key ID in X-Amz-Credential. On one
         # production site such IDs made two of every three report rows.

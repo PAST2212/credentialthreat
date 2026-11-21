@@ -20,7 +20,7 @@ async def worker_findings(scanner, page):
 class BenchmarkTests(unittest.IsolatedAsyncioTestCase):
     async def test_debug_configuration_and_mismatched_pem_blocks(self):
         expected = {
-            "debug-option": [], "mixed-script": ["api_key", "jwt"], "next-property": [], "id-presigned-url": [],
+            "debug-option": [], "mixed-script": ["api_key", "jwt"], "next-property": [], "id-presigned-url": [], "cors-keyword": [],
             "pem-crossed-a": [], "pem-crossed-b": [],
             "pem-panel": ["private_key"], "pem-rsa": ["private_key"],
         }

@@ -59,6 +59,7 @@ PAGES = (
     page("log-option", '<script>app_log_level = "CRITICAL";</script>'),
     page("unequal-quotes", """<script>api_key = "FIXTUREONLY123';</script>"""),
     page("next-property", '<script>x={withCredentials:this.withCredentials,requestType:"arraybuffer"}</script>'),
+    page("cors-keyword", '<script>e.withCredentials="use-credentials"</script>'),
     page("two-assignments", '<script>api_key="', Target(VALUE, A), '"; api_key="', Target(VALUE, A), '";</script>'),
     page("mixed-config", '<pre>api_key="', Target(VALUE, A, example=True),
          '"</pre><script type="application/json">{"client_secret":"', Target(VALUE, A), '"}</script>'),

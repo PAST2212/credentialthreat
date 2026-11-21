@@ -97,7 +97,8 @@ class ScanerCredentials:
             r"(?:=|>|:=|\|\|:|<=|=>|:|->|\+=|\-=|\*=|\/=|%=|\^=|&=|\|=|==|\+=|<<=|>>=|=>|\?=|\?\?=)" +  # Operators
             r"\s*" +  # Optional whitespace
             r"(?P<quote>['\"])" +
-            r"(?!same-origin(?P=quote))" +  # Fetch API option credentials: "same-origin", not a secret
+            # Fetch API option credentials: "same-origin" and CORS mode "use-credentials", not secrets
+            r"(?!(?:same-origin|use-credentials)(?P=quote))" +
             r"(?P<value>[0-9a-zA-Z\-_=+/]{8,128})(?P=quote)"
         )
         # The rule as written, matched case-insensitively (tests/measure_rules.py reads it).
