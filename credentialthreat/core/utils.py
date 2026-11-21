@@ -362,22 +362,13 @@ class UrlPrioritizer:
             logging.info(FY + f"\nFinal Selection:"
                               f"\n└── Using {limit:,} high priority URLs only (limit reached)" + S)
         else:
-            result = high_priority
+            # New lists, so that the counts below are those of the selection, not of the input.
             remaining = limit - high_count
+            medium = medium_priority[:remaining]
+            low = low_priority[:remaining - len(medium)]
+            result = high_priority + medium + low
 
-            if not is_internal and remaining > 0 and medium_priority:
-                med_used = min(remaining, med_count)
-                result.extend(medium_priority[:med_used])
-                remaining -= med_used
-
-            if remaining > 0 and low_priority:
-                low_used = min(remaining, low_count)
-                result.extend(low_priority[:low_used])
-
-            # Log final distribution
-            final_high = len(high_priority)
-            final_med = len(medium_priority[:limit - high_count]) if not is_internal else 0
-            final_low = min(limit - len(result) + final_med, low_count)
+            final_high, final_med, final_low = high_count, len(medium), len(low)
 
             logging.info(FY + f"\nFinal Selection:"
                               f"\n├── Selected URLs: {len(result):,}"

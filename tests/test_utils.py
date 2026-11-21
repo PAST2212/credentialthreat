@@ -27,6 +27,33 @@ class PrioritizerTests(unittest.TestCase):
         self.assertEqual(pick(urls, 3), pick(list(reversed(urls)), 3))
 
 
+class FinalSelectionLogTests(unittest.TestCase):
+    # On one production site the log read `High Priority: 586 (100.0%)` for a selection with 141 high-priority URLs.
+    def final_selection(self, urls, limit):
+        with self.assertLogs(level="INFO") as logs:
+            result = utils.UrlPrioritizer().prioritize_urls(urls, limit=limit)
+        message, = [record.getMessage() for record in logs.records if "Final Selection" in record.getMessage()]
+        return result, message
+
+    def test_resources_are_counted_by_the_priority_they_were_selected_for(self):
+        base = "https://h.example.com/"
+        high = [(base, base + f"auth{i}.css") for i in range(2)]
+        medium = [(base, base + f"app{i}.js") for i in range(3)]
+        low = [(base, base + f"site{i}.css") for i in range(4)]
+        result, message = self.final_selection(low + medium + high, limit=7)
+        self.assertCountEqual(result, high + medium + low[:2])
+        for line in ("Selected URLs: 7", "High Priority: 2 (28.6%)", "Medium Priority: 3 (42.9%)", "Low Priority: 2 (28.6%)"):
+            self.assertIn(line, message)
+
+    def test_pages_are_counted_by_the_priority_they_were_selected_for(self):
+        high = ["https://dev.a.example.com/", "https://dev.b.example.com/"]
+        low = [f"https://www.example.com/p/{i}" for i in range(4)]
+        result, message = self.final_selection(low + high, limit=3)
+        self.assertCountEqual(result, high + low[:1])
+        for line in ("Selected URLs: 3", "High Priority: 2 (66.7%)", "Low Priority: 1 (33.3%)"):
+            self.assertIn(line, message)
+
+
 class HostConnectionBudgetTests(unittest.TestCase):
     def test_workers_together_never_open_more_than_the_host_budget(self):
         for workers in (1, 2, 5, 7, 11):
