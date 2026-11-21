@@ -64,10 +64,11 @@ The sources barely overlap. Of the 334 new public hosts from all sources except 
 
 AnubisDB was added as a third provider:
 
-- It more than doubled the start pages that link discovery read, and it contains 1,360 of the 1,525 hosts that crt.sh found (89%). When crt.sh fails, AnubisDB still delivers most of its hosts.
+- It more than doubled the start pages that link discovery read, and it contains 1,360 of the 1,525 hosts that crt.sh found (89%). For a domain it covers, AnubisDB still delivers most hosts when crt.sh fails.
 - Its operator describes it as a free API without key or account. The published limit is 60 requests per 10 seconds per source IP, and a domain holds at most 10,000 subdomains. No terms forbid automated use. [Anubis-DB README](https://github.com/jonluca/Anubis-DB#limits)
 - It answers with a JSON array of hostnames, `[]` for an unknown domain, and the same list on repeated queries within its five-minute cache.
 - Recon tools submit their results to AnubisDB. The scanner only reads from it, so the names it discovers never leave the machine. A test fails on any submission.
+- Its coverage depends on what tools have submitted. It held thousands of hosts for several large companies, but none for a university domain with 3,684 hosts in crt.sh, and none for eight other university domains checked the same day. It complements crt.sh and does not replace it.
 
 The other sources were not added:
 
