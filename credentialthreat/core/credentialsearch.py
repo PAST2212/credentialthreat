@@ -19,6 +19,20 @@ logger = logging.getLogger(__name__)
 # Each maps to exactly one character, so a folded copy keeps every span of the original text.
 CASE_FOLD = str.maketrans({**{chr(code): chr(code + 32) for code in range(ord("A"), ord("Z") + 1)},
                            "\u0130": "i", "\u0131": "i", "\u017f": "s", "\u212a": "k"})
+# str.lower() folds A-Z and the Kelvin sign alike and maps every other character to one non-ASCII character,
+# which the ASCII-only rules never match. Only these three differ: dotted capital I lowers to two characters,
+# dotless i and long s stay as they are.
+LOWER_DIFFERS = ("\u0130", "\u0131", "\u017f")
+
+
+def fold_case(text: str) -> str:
+    """Text the lower-case rules match at the original spans, as CASE_FOLD folds it.
+
+    On text with any non-ASCII character, str.translate takes about 75 ms per MB and str.lower() about 5 ms.
+    """
+    if any(char in text for char in LOWER_DIFFERS):
+        return text.translate(CASE_FOLD)
+    return text.lower()
 
 
 class ScanerCredentials:
@@ -124,7 +138,7 @@ class ScanerCredentials:
 
     def _findings(self, data: str) -> list[tuple[str, str]]:
         labels_by_span: dict[tuple[int, int], list[str]] = {}
-        for match in self._assignment.finditer(data.translate(CASE_FOLD)):
+        for match in self._assignment.finditer(fold_case(data)):
             labels_by_span[match.span("value")] = [data[slice(*match.span("label"))].lower()]
         for pattern_name, pattern in self.additional_patterns.items():
             for match in re.finditer(pattern, data):

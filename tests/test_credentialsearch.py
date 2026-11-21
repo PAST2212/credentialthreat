@@ -74,6 +74,38 @@ class MatcherTests(unittest.TestCase):
                 self.assertEqual(scanner._findings(sample), case_insensitive_findings(scanner, sample))
                 self.assertTrue(scanner._findings(sample))
 
+    def test_every_character_that_folds_differently_matches_like_before(self):
+        # str.lower() folds like CASE_FOLD except for three characters: dotted capital I lowers to two
+        # characters, dotless i and long s stay unchanged. The Kelvin sign and other letters lower alike.
+        scanner = ScanerCredentials()
+        templates = ('{c} api_key = "FIXTUREONLYVALUE1"', 'api_key = "FIXTUREONLYVALUE1" {c}',
+                     'api_key = "FIXTURE{c}ONLYVALUE"', 'ap{c}_key = "FIXTUREONLYVALUE2" acce{c}s_key = "FIXTUREONLYVALUE3"',
+                     'Ä {c} api_key = "FIXTUREONLYVALUE4" api_Key = "FIXTUREONLYVALUE5"')
+        for char in ("İ", "ı", "ſ", "K", "Ä", "ä", "ß", "\U0001f600", "I", "S"):
+            for template in templates:
+                sample = template.format(c=char)
+                with self.subTest(sample=ascii(sample)):
+                    self.assertEqual(scanner._findings(sample), case_insensitive_findings(scanner, sample))
+
+    def test_non_ascii_text_costs_little_more_to_match_than_ascii_text(self):
+        # Pages are mostly non-ASCII, where translating with CASE_FOLD cost about 0.08 s per MB, a third of
+        # the matching. Alternate the runs and keep the fastest of each, so a busy machine slows both alike.
+        scanner = ScanerCredentials()
+        ascii_text = minified_script(1_000_000)
+        non_ascii_text = ascii_text[:-1] + "ä"
+
+        def timed(text):
+            start = time.perf_counter()
+            scanner._findings(text)
+            return time.perf_counter() - start
+
+        ascii_times, non_ascii_times = [], []
+        for _ in range(5):
+            ascii_times.append(timed(ascii_text))
+            non_ascii_times.append(timed(non_ascii_text))
+        self.assertLess(min(non_ascii_times), min(ascii_times) * 1.2,
+                        f"non-ASCII {min(non_ascii_times):.3f}s, ASCII {min(ascii_times):.3f}s")
+
     def test_fetch_credentials_mode_is_not_a_candidate(self):
         # The Fetch API option credentials: "same-origin" was every match on one production site.
         scanner = ScanerCredentials()
