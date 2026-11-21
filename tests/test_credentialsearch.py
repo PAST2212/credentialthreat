@@ -171,6 +171,27 @@ class MatcherTests(unittest.TestCase):
                                                 'api_key = "FIXTUREONLY123"'),
                               [("api_key", "[REDACTED]"), ("auth_token", "[REDACTED]")])
 
+    def test_jwt_rule_requires_a_header_with_alg(self):
+        # A signed link parameter on a production site looked like a JWT: base64url JSON, then two dot-separated
+        # segments. Its header was {"v":"1"}; a JWS or JWE header always names its algorithm in "alg".
+        import base64
+
+        def segment(data: bytes) -> str:
+            return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+        payload, signature = segment(b'{"sub":"FIXTUREONLY"}'), segment(b"FIXTURESIGNATURE")
+        scanner = ScanerCredentials()
+        # "alg" at each byte offset modulo 3 encodes differently, so each alignment is checked.
+        for header in (b'{"alg":"FIXTURE"}', b'{"kid":"1","alg":"FIXTURE"}', b'{"kid":"12","alg":"FIXTURE"}',
+                       b'{"kid": "12", "alg": "FIXTURE"}', b'{"typ":"JWT","alg":"none"}'):
+            with self.subTest(header=header):
+                token = f"{segment(header)}.{payload}.{signature}"
+                self.assertEqual(scanner._findings(f'<a href="/x?t={token}">'), [("jwt", "[REDACTED]")])
+        for header in (b'{"v":"1"}', b'{"typ":"JWT"}', b'{"algorithm":"FIXTURE"}', b'{"kid":"alg"}'):
+            with self.subTest(header=header):
+                token = f"{segment(header)}.{payload}.{signature}"
+                self.assertEqual(scanner._findings(f'<a href="/x?dib={token}&dib_tag=se">'), [])
+
     def test_assignment_rule_does_not_scan_text_case_insensitively(self):
         # Case-insensitive matching of the field-name alternation costs about 1.5 s per MB of script
         # and blocks the worker's event loop meanwhile. Compare on this machine, not against a fixed time.

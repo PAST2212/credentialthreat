@@ -8,7 +8,7 @@ The general rule looks for a named field and a quoted value. Separate rules reco
 
 ## Offline precision and recall
 
-Run `python tests/measure_rules.py` from the checkout. The benchmark scores the matcher on 39 synthetic HTML responses. It bypasses discovery and HTTP. Before measuring, the author labeled 31 rule occurrences by rule, page and exact half-open source span. Of these, 24 simulate findings the owner wants to review and seven represent deliberately published examples. A position labeled for two rules contributes once to each. A duplicate cannot claim a second true positive. Precision is TP / (TP + FP), recall is TP / (TP + FN), and an empty denominator prints `n/a`.
+Run `python tests/measure_rules.py` from the checkout. The benchmark scores the matcher on 39 synthetic HTML responses (40 since a later false-positive page, below). It bypasses discovery and HTTP. Before measuring, the author labeled 31 rule occurrences by rule, page and exact half-open source span. Of these, 24 simulate findings the owner wants to review and seven represent deliberately published examples. A position labeled for two rules contributes once to each. A duplicate cannot claim a second true positive. Precision is TP / (TP + FP), recall is TP / (TP + FN), and an empty denominator prints `n/a`.
 
 **Owner-review results.** Before and after use the same pages and annotations. FP and FN page names refer to the current matcher. The command also prints their character offsets.
 
@@ -30,7 +30,9 @@ Later pages hold no target. Each reproduces a false positive from a production s
 - `id-presigned-url`: the AWS rule matched the access key ID in the `X-Amz-Credential` parameter of a presigned S3 URL, which is made to be handed out. The rule now skips an ID that directly follows `X-Amz-Credential=` or its URL-encoded form.
 - `cors-keyword`: the assignment rule matched the CORS mode `use-credentials` assigned to `withCredentials`. Like `same-origin`, this value is now excluded.
 
-With these pages the corpus file has SHA-256 `474593d09fbdd4ff3c64165166b87483f9e1b2c9dde88cabd36d5597a4278a45` with LF line endings, and every score above is unchanged.
+- `jwt-shaped-link-parameter`: the JWT rule matched a signed link parameter whose first segment is base64url JSON `{"v":"1"}`. On one production page the same parameter appeared in up to 624 links. A JWS or JWE header always contains `"alg"`, so the rule now requires one of its three base64url encodings in the first segment.
+
+With these pages the corpus file has SHA-256 `29169faef32466a4f5660e40dd075b2ce31c0408260d8b591b7b81a55b475dc5` with LF line endings (40 responses), and every score above is unchanged.
 
 ## Verified defects and changes
 

@@ -69,6 +69,8 @@ PAGES = (
     page("jwt-manual", '<script>const fixture = "', Target(JWT, J, example=True), '";</script>'),
     page("jwt-empty", '<p>JWT example omitted</p>'),
     page("jwt-header-only", '<code>eyJhbGciOiJGSVhUVVJFIn0</code>'),
+    # A signed link parameter: base64url JSON {"v":"1"} and two more segments, but no "alg" in the header.
+    page("jwt-shaped-link-parameter", '<a href="/item/FIXTURE?dib=eyJ2IjoiMSJ9.RklYVFVSRQ.RklYVFVSRQ&amp;dib_tag=se">item</a>'),
     page("pem-panel", '<pre>', Target(PEM, P), '</pre>'),
     page("pem-rsa", '<textarea>', Target(RSA, P), '</textarea>'),
     page("pem-pair", '<pre>', Target(PEM, P), '\n', Target(RSA, P), '</pre>'),
