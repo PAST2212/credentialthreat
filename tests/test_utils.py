@@ -94,6 +94,20 @@ class ChunkPlanTests(unittest.TestCase):
         for chunk in utils.plan_chunks(urls, workers=2):
             self.assertEqual({url.split("/")[2] for url in chunk}, {"a.example.com", "b.example.com"})
 
+    def test_a_host_with_many_urls_does_not_fill_a_chunk_ahead_of_the_others(self):
+        # In a sorted list one host's URLs are contiguous. A worker keeps 50 requests in flight but only five per host,
+        # so on one scan the URLs of a host that answered in 10 s filled every window: for 18 minutes the stage
+        # completed 150 instead of about 2,000 requests per minute while the other hosts waited.
+        slow = [f"https://a.example.com/{i:03d}" for i in range(60)]
+        others = [f"https://{name}.example.com/" for name in "bcdefghij"]
+        for items in (slow + others, [("https://www.example.com/", url) for url in slow + others]):
+            with self.subTest(kind=type(items[0]).__name__):
+                chunk, = utils.plan_chunks(items, workers=1)
+                self.assertCountEqual(chunk, items)
+                host = (lambda item: item[1] if isinstance(item, tuple) else item)
+                first = {host(item).split("/")[2] for item in chunk[:len(others) + 1]}
+                self.assertEqual(len(first), len(others) + 1)
+
     def test_small_inputs_split_down_to_single_items(self):
         self.assertEqual(utils.plan_chunks(["a", "b", "c"], workers=5), [["a"], ["b"], ["c"]])
 

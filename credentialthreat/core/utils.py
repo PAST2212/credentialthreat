@@ -2,6 +2,8 @@
 
 import re
 import logging
+from collections import deque
+from urllib.parse import urlsplit
 from typing import Union
 import asyncio
 import multiprocessing
@@ -59,12 +61,41 @@ def plan_chunks(items: list, workers: int) -> list[list]:
 
     A chunk only finishes with its slowest request, so each additional chunk per worker would add
     a stretch with few requests in flight. Dealing instead of slicing mixes the hosts of a sorted
-    list into every chunk, which keeps the chunks similar in duration.
+    list into every chunk, which keeps the chunks similar in duration. Within a chunk the hosts take
+    turns, so one host with many items does not hold the others back.
     Peak memory depends on the requests in flight per worker, not on the chunk size.
     """
     items = list(items)
     count = min(len(items), max(1, workers))
-    return [items[index::count] for index in range(count)]
+    return [interleave_by_host(items[index::count]) for index in range(count)]
+
+
+def _request_host(item) -> str:
+    """The host an item is requested from: a host name, a URL, or the resource URL of an (origin, resource) pair."""
+    value = item[1] if isinstance(item, tuple) else item
+    if not isinstance(value, str):
+        return ""
+    return (urlsplit(value).hostname or "") if "://" in value else value
+
+
+def interleave_by_host(items: list) -> list:
+    """The items in turns by host, each host's items in their original order.
+
+    A worker keeps `window_size` requests in flight but only its share of connections per host. In a sorted list
+    one host's items are contiguous, so a host with many items filled the whole window with requests waiting for
+    that host, and the other hosts waited behind them.
+    """
+    groups: dict[str, deque] = {}
+    for item in items:
+        groups.setdefault(_request_host(item), deque()).append(item)
+    turns = deque(groups.values())
+    result = []
+    while turns:
+        group = turns.popleft()
+        result.append(group.popleft())
+        if group:
+            turns.append(group)
+    return result
 
 
 class UrlPrioritizer:
