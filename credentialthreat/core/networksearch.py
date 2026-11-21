@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 from bs4 import MarkupResemblesLocatorWarning
 from bs4 import XMLParsedAsHTMLWarning
 from credentialthreat.core.credentialsearch import ScanerCredentials
-from credentialthreat.core.fetch import HostPacer, fetch_text, get_header
+from credentialthreat.core.fetch import HostPacer, Page, fetch_text, get_header
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
 from credentialthreat.core.website import (PublicDestinationConnector, canonical_url, module_imports, report_origin,
                                            resolve_reference, url_in_scope)
@@ -47,6 +47,18 @@ class ScanerNetworkResources:
         self.scope = tuple(scope)
         self.outcomes: Counter = Counter()
 
+    @staticmethod
+    def parse(page: Page) -> BeautifulSoup:
+        """The page's markup for link and resource extraction."""
+        markup = page.text
+        # WordPress JSON API responses embed HTML with escaped URLs; re-serializing unescapes them.
+        if 'application/json' in page.content_type:
+            try:
+                markup = f"<html><body>{json.dumps(json.loads(markup))}</body></html>"
+            except json.JSONDecodeError:
+                pass
+        return BeautifulSoup(markup, 'html.parser')
+
     async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, tuple[str, str, BeautifulSoup]]:
         """Final page URL, page text and parsed markup, or None when the page could not be read."""
         # Parsing or matching another page can block this worker's loop past sock_connect and turn a connection
@@ -55,14 +67,7 @@ class ScanerNetworkResources:
                                 pacer=self.pacer, outcomes=self.outcomes, connect_retries=1)
         if page is None:
             return None
-        markup = page.text
-        # WordPress JSON API responses embed HTML with escaped URLs; re-serializing unescapes them.
-        if 'application/json' in page.content_type:
-            try:
-                markup = f"<html><body>{json.dumps(json.loads(markup))}</body></html>"
-            except json.JSONDecodeError:
-                pass
-        return page.url, page.text, BeautifulSoup(markup, 'html.parser')
+        return page.url, page.text, self.parse(page)
 
     @staticmethod
     def _clean_url(url: str) -> str:
@@ -92,6 +97,34 @@ class ScanerNetworkResources:
                 results.append(ScrapNetworkUrls(base_url, full_url))
         return results
 
+    def scan_page(self, url: str, text: str, soup: BeautifulSoup, domains_input) -> tuple[list[ScrapNetworkUrls], list[tuple]]:
+        """Resources a fetched page references, and the redacted candidates in its text."""
+        results = []
+        candidates = []
+        if findings := self.matcher._findings(text):
+            candidates.append((report_origin(url), report_origin(url), findings))
+
+        for script in soup.find_all("script"):
+            results.extend(self._extract_url(script, 'src', url, domains_input, None))
+            results.extend(self._extract_url(script, 'data-src', url, domains_input, None))
+
+        for resource in soup.find_all(['link', 'iframe', 'frame', 'embed', 'object']):
+            for attr in ['href', 'src', 'data', 'data-src']:
+                results.extend(self._extract_url(resource, attr, url, domains_input, None))
+
+        for script in soup.find_all("script", src=None):  # inline scripts
+            if script_text := script.string:
+                # ES module imports, then the script loaders whose argument is a plain URL
+                references = module_imports(script_text)
+                for pattern in (r'require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
+                                r'importScripts\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
+                                r'loadScript\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)'):
+                    references.extend(match.group(1) for match in re.finditer(pattern, script_text))
+                for reference in references:
+                    if imported_url := resolve_reference(url, reference, domains_input):
+                        results.append(ScrapNetworkUrls(url, imported_url))
+        return results, candidates
+
     async def _fetch_network_sources(self, url: str, domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract, header, session: aiohttp.ClientSession) -> tuple[list[ScrapNetworkUrls], list[tuple]]:
         """Resources the page references, and the redacted candidates in the page text itself.
 
@@ -108,28 +141,7 @@ class ScanerNetworkResources:
             if fetched is not None:
                 url, text, soup = fetched
                 self.pages.add(url)
-                if findings := self.matcher._findings(text):
-                    candidates.append((report_origin(url), report_origin(url), findings))
-
-                for script in soup.find_all("script"):
-                    results.extend(self._extract_url(script, 'src', url, domains_input, tld_extract))
-                    results.extend(self._extract_url(script, 'data-src', url, domains_input, tld_extract))
-
-                for resource in soup.find_all(['link', 'iframe', 'frame', 'embed', 'object']):
-                    for attr in ['href', 'src', 'data', 'data-src']:
-                        results.extend(self._extract_url(resource, attr, url, domains_input, tld_extract))
-
-                for script in soup.find_all("script", src=None):  # inline scripts
-                    if script_text := script.string:
-                        # ES module imports, then the script loaders whose argument is a plain URL
-                        references = module_imports(script_text)
-                        for pattern in (r'require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
-                                        r'importScripts\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
-                                        r'loadScript\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)'):
-                            references.extend(match.group(1) for match in re.finditer(pattern, script_text))
-                        for reference in references:
-                            if imported_url := resolve_reference(url, reference, domains_input):
-                                results.append(ScrapNetworkUrls(url, imported_url))
+                results, candidates = self.scan_page(url, text, soup, domains_input)
 
         except Exception:
             self.pages.add(url)

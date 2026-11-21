@@ -31,7 +31,7 @@ HOLD_DIRECTORY = "CREDENTIALTHREAT_TEST_HOLD_DIRECTORY"
 def hold_first_chunk(args):
     # Spawned workers inherit the environment, so the directory travels outside the scan arguments.
     hold_job(os.environ[HOLD_DIRECTORY])
-    return [], set()
+    return [], [], set(), [], {}
 
 
 def wait_until_started(directory):

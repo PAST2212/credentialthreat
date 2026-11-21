@@ -194,6 +194,9 @@ def _run_scan(killer):
         worker = partial(process_chunks_for_internallinks)
 
         internal_links: set[str] = set()
+        start_resources = []  # resources the start pages reference
+        link_pages: set[str] = set()  # start pages the link stage requested; the page stage skips them
+        leaks = []  # candidates in the page texts, matched by the link and page workers
         link_outcomes: Counter = Counter()
         completed_chunks = 0
 
@@ -204,8 +207,11 @@ def _run_scan(killer):
         try:
             with killer.defer_pool_signals(), create_pool(processes=num_processes) as pool:
                 for chunk_result in killer.pool_results(pool, worker, process_chunks):
-                    internal_urls, outcomes = chunk_result
+                    internal_urls, resources, pages, page_leaks, outcomes = chunk_result
                     internal_links.update(internal_urls)
+                    start_resources.extend(resources)
+                    link_pages.update(pages)
+                    leaks.extend(page_leaks)
                     link_outcomes.update(outcomes)
                     completed_chunks += 1
                     logging.info(FG + f"Chunk {completed_chunks}/{total_chunks} completed: {len(internal_urls)} Internal URLs found\n" + S)
@@ -218,51 +224,53 @@ def _run_scan(killer):
             return 1
         _log_outcomes("Internal URL scan", link_outcomes)
 
-        # Sorted, so that a URL limit keeps the same pages on every run.
+        # Sorted, so that a URL limit keeps the same pages on every run. The link stage already scanned the start pages.
         host_names_normalized = sorted({url for url in map(canonical_url, internal_links)
-                                        if url and url_in_scope(url, domains) and not is_binary_url(url)})
+                                        if url and url not in link_pages and url_in_scope(url, domains)
+                                        and not is_binary_url(url)})
         logging.info(f'{len(host_names_normalized)} Internal URLs were found for {len(fqdn)} Fully Qualified Domain Names')
         host_names_scaled = UrlPrioritizer().prioritize_urls(urls=host_names_normalized, limit=url_limit)
         logging.info(FG + "End Internal URL Scan\n" + S)
-        if not host_names_scaled:
-            return _write_scan_report([], status, partial_discovery)
+        if not host_names_scaled and not start_resources:
+            return _write_scan_report(leaks, status, partial_discovery)
 
-        process_chunks = [(chunk, domains, SUFFIXES, host_connections)
-                          for chunk in utils.plan_chunks(host_names_scaled, num_processes)]
-        total_chunks = len(process_chunks)
-
-        worker = partial(process_chunks_for_networksearch)
-
-        network_files_whitelist = []
-        scanned_pages: set = set()
-        leaks = []  # candidates in the page texts, matched by the page workers
-        page_outcomes: Counter = Counter()
-        completed_chunks = 0
+        network_files_whitelist = list(start_resources)
+        scanned_pages: set = set(link_pages)
 
         start1 = time.perf_counter()
-        logging.info(FY + f"\nStarting Network Resource Scan:"
-                          f"\n├── Total URLs: {len(host_names_scaled):,}"
-                          f"\n├── Total Chunks: {total_chunks}"
-                          f"\n└── CPU Cores: {num_processes}\n" + S)
-        try:
-            with killer.defer_pool_signals(), create_pool(processes=num_processes) as pool:
-                for chunk_result in killer.pool_results(pool, worker, process_chunks):
-                    network_f_whitelist, pages, page_leaks, outcomes = chunk_result
-                    network_files_whitelist.extend(network_f_whitelist)
-                    scanned_pages.update(pages)
-                    leaks.extend(page_leaks)
-                    page_outcomes.update(outcomes)
-                    completed_chunks += 1
-                    logging.info(FG + f"Chunk {completed_chunks}/{total_chunks} completed: {len(network_f_whitelist)} Network URLs found, "
-                                      f"{len(page_leaks)} pages with candidates\n" + S)
+        if host_names_scaled:
+            process_chunks = [(chunk, domains, SUFFIXES, host_connections)
+                              for chunk in utils.plan_chunks(host_names_scaled, num_processes)]
+            total_chunks = len(process_chunks)
 
-        except KeyboardInterrupt:
-            logging.info("\nNetwork scan cancelled by user")
-            return 1
-        except Exception as e:
-            logging.error("Error during network scanning (%s)", type(e).__name__)
-            return 1
-        _log_outcomes("Network resource scan", page_outcomes)
+            worker = partial(process_chunks_for_networksearch)
+
+            page_outcomes: Counter = Counter()
+            completed_chunks = 0
+
+            logging.info(FY + f"\nStarting Network Resource Scan:"
+                              f"\n├── Total URLs: {len(host_names_scaled):,}"
+                              f"\n├── Total Chunks: {total_chunks}"
+                              f"\n└── CPU Cores: {num_processes}\n" + S)
+            try:
+                with killer.defer_pool_signals(), create_pool(processes=num_processes) as pool:
+                    for chunk_result in killer.pool_results(pool, worker, process_chunks):
+                        network_f_whitelist, pages, page_leaks, outcomes = chunk_result
+                        network_files_whitelist.extend(network_f_whitelist)
+                        scanned_pages.update(pages)
+                        leaks.extend(page_leaks)
+                        page_outcomes.update(outcomes)
+                        completed_chunks += 1
+                        logging.info(FG + f"Chunk {completed_chunks}/{total_chunks} completed: {len(network_f_whitelist)} Network URLs found, "
+                                          f"{len(page_leaks)} pages with candidates\n" + S)
+
+            except KeyboardInterrupt:
+                logging.info("\nNetwork scan cancelled by user")
+                return 1
+            except Exception as e:
+                logging.error("Error during network scanning (%s)", type(e).__name__)
+                return 1
+            _log_outcomes("Network resource scan", page_outcomes)
 
         network_files_whitelist = list({obj.script_url: obj for obj in reversed(network_files_whitelist)}.values())
         # The page workers already matched every page they requested, so the credential stage, and the

@@ -22,9 +22,9 @@ Always go through `discover -s tests`. `test_rule_benchmark.py` imports `credent
 `_run_scan` in `credentialthreat.py` runs these stages in order:
 
 1. **Discovery** (`core/subdomainsearch.py`) runs in the parent process. It queries crt.sh and RapidDNS for every configured domain and keeps only in-scope hosts.
-2. **Internal links** (`core/internallinksearch.py`) fetches each host's home page and collects its `<a href>` links.
+2. **Internal links** (`core/internallinksearch.py`) fetches each host's start page and collects its `<a href>` links. It also scans the start page as stage 3 scans other pages, through `ScanerNetworkResources.parse` and `scan_page`. Its worker returns `(links, resources, requested pages, redacted page candidates, outcomes)`. The CLI drops the requested pages from stage 3's input, so stage 3 never fetches a start page again.
 3. **Network resources** (`core/networksearch.py`) fetches each page once. It collects script, link, iframe and other resource URLs, plus the targets of inline module imports (`website.module_imports`) and of `require`, `importScripts` and `loadScript`. It also matches the credential rules (`ScanerCredentials._findings`) against the page text. Its worker returns `(resources, requested pages, redacted page candidates, outcomes)`.
-4. **Credentials** (`core/credentialsearch.py`) fetches each remaining resource and matches the credential rules against the response text. The CLI drops every URL that stage 3 requested, so stages 3 and 4 never fetch a page twice, and merges both candidate lists before writing the report. Start pages are the exception across stages: stage 2 reads them only for links, and stage 3 requests them again. Its worker returns `(candidates, outcomes, imports)`. `imports` lists the in-scope modules that 2xx JavaScript responses import. The CLI fetches new ones in further rounds on the same pool, at most `IMPORT_ROUNDS` (5). `_next_imports` drops every URL already requested and counts the rest against `--limit`. When the limit cuts them, `UrlPrioritizer` decides which are kept, as in the first round.
+4. **Credentials** (`core/credentialsearch.py`) fetches each remaining resource and matches the credential rules against the response text. The CLI drops every URL that stages 2 and 3 requested, so no page is fetched twice, and merges the candidate lists of stages 2–4 before writing the report. Its worker returns `(candidates, outcomes, imports)`. `imports` lists the in-scope modules that 2xx JavaScript responses import. The CLI fetches new ones in further rounds on the same pool, at most `IMPORT_ROUNDS` (5). `_next_imports` drops every URL already requested and counts the rest against `--limit`. When the limit cuts them, `UrlPrioritizer` decides which are kept, as in the first round.
 
 Stages 2–4 share one pattern:
 
@@ -33,8 +33,8 @@ Stages 2–4 share one pattern:
 - Each chunk goes to a module-level `process_chunks_for_*` function, which calls `asyncio.run` on a scanner class constructed with `scope=domains`. Workers return their results plus a dict of request outcomes. The parent sums the outcomes and logs one `... requests: ok=N, error status=E (...), skipped=M (...)` line per stage. The `error status` part appears only when error pages were read.
 - Inside a worker, `AsyncCancellationManager.run_window` keeps `window_size` requests in flight (a sliding window, not batches), so one slow response never holds back the others.
 - The parent reads results through `GracefulKiller.pool_results`, which converts SIGINT/SIGTERM into `ScanInterrupted`.
-- `UrlPrioritizer` in `core/utils.py` caps each stage's input at `--limit` and takes high-priority URL patterns first. Pages and the other resources are capped separately; pages never count against the resource cap.
-- When a stage has no input, the CLI writes the report straight away and skips the remaining pools. Tests cover this.
+- `UrlPrioritizer` in `core/utils.py` caps each stage's input at `--limit` and takes high-priority URL patterns first. Pages and the other resources are capped separately; pages never count against the resource cap. Start pages are not capped: stage 2 scans them before the page cap applies.
+- When a stage has no input, the CLI skips its pool. When no pages and no resources remain, it writes the report straight away and skips the remaining pools. Tests cover this.
 
 The workers have to survive multiprocessing:
 

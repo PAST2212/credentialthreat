@@ -33,7 +33,7 @@ class CliTests(unittest.TestCase):
                     files_mock = Mock()
                     files_mock.return_value.get_domains.return_value = [host]
                     pools = Mock(wraps=ThreadPool)
-                    links = Mock(return_value=([] if no_pages else [f"https://{host}/"], set()))
+                    links = Mock(return_value=([] if no_pages else [f"https://{host}/"], [], set(), [], {}))
                     resources = Mock(return_value=([], set(), [], {}))
                     matches = Mock(return_value=[])
                     discovery = QueryResult("crt.sh", host, None, reason="timeout") if discovery_failed else QueryResult("crt.sh", host, 0)
@@ -92,7 +92,7 @@ class CliTests(unittest.TestCase):
 
         def links(args):
             seen_hosts.extend(args[0])
-            return [internal_page, internal_page, sibling], set()
+            return [internal_page, internal_page, sibling], [], set(), [], {}
 
         def resources(args):
             seen_pages.extend(args[0])
@@ -168,7 +168,7 @@ class CliTests(unittest.TestCase):
                 "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=10),
                 "create_pool": ThreadPool,
                 "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
-                "process_chunks_for_internallinks": lambda args: ([page], {}),
+                "process_chunks_for_internallinks": lambda args: ([page], [], set(), [], {}),
             }))
             stack.enter_context(contextlib.redirect_stdout(stdout))
             with self.assertLogs(level="INFO") as logs:
@@ -200,7 +200,7 @@ class CliTests(unittest.TestCase):
                 "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=10),
                 "ManageFiles": files_mock, "create_pool": pools,
                 "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
-                "process_chunks_for_internallinks": lambda args: ([page], {}),
+                "process_chunks_for_internallinks": lambda args: ([page], [], set(), [], {}),
                 "process_chunks_for_networksearch": lambda args: ([], {page}, [candidate], {"ok": 1}),
                 "process_chunks_for_credentialsearch": matches,
             }))
@@ -211,6 +211,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(pools.call_count, 2)
         files_mock.write_csv_result_file.assert_called_once_with(iterables=[candidate])
         self.assertIn("Unverified credential matches: 1 (affected resources: 1)", " ".join(logs.output))
+
+    def test_start_page_candidates_are_reported_when_no_other_page_or_resource_remains(self):
+        main = CLI["main"]
+        host = "shop.example.com"
+        page = f"https://{host}/"
+        candidate = ("https://" + host, "https://" + host, [("api_key", "[REDACTED]")])
+        files_mock = Mock()
+        files_mock.return_value.get_domains.return_value = [host]
+        pools = Mock(wraps=ThreadPool)
+        page_worker = Mock(return_value=([], set(), [], {}))
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(CLI["utils"], "get_workers", return_value=1))
+            stack.enter_context(patch.object(CLI["utils"], "configure_platform_settings"))
+            stack.enter_context(patch.dict(main.__globals__, {
+                "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=10),
+                "ManageFiles": files_mock, "create_pool": pools,
+                "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
+                "process_chunks_for_internallinks": lambda args: ([page], [], {page}, [candidate], {"ok": 1}),
+                "process_chunks_for_networksearch": page_worker,
+            }))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertLogs(level="INFO"):
+                self.assertEqual(main(), 0)
+        page_worker.assert_not_called()
+        self.assertEqual(pools.call_count, 1)
+        files_mock.write_csv_result_file.assert_called_once_with(iterables=[candidate])
 
     def test_resource_limit_counts_only_resources_that_are_not_pages(self):
         main = CLI["main"]
@@ -239,7 +265,7 @@ class CliTests(unittest.TestCase):
                 "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=2),
                 "ManageFiles": files_mock, "create_pool": ThreadPool,
                 "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
-                "process_chunks_for_internallinks": lambda args: (pages, {}),
+                "process_chunks_for_internallinks": lambda args: (pages, [], set(), [], {}),
                 "process_chunks_for_networksearch": page_worker,
                 "process_chunks_for_credentialsearch": resource_worker,
             }))
@@ -270,7 +296,7 @@ class CliTests(unittest.TestCase):
                 "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=limit),
                 "ManageFiles": files_mock, "create_pool": pools,
                 "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
-                "process_chunks_for_internallinks": lambda args: ([page], {}),
+                "process_chunks_for_internallinks": lambda args: ([page], [], set(), [], {}),
                 "process_chunks_for_networksearch": lambda args: (
                     [utils.ScrapNetworkUrls(page, page + "app.js")], {page}, [], {"ok": 1}),
                 "process_chunks_for_credentialsearch": resource_worker,
@@ -321,7 +347,7 @@ class CliTests(unittest.TestCase):
             stack.enter_context(patch.dict(main.__globals__, {
                 "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=10),
                 "ManageFiles": files_mock, "create_pool": ThreadPool, "scan_subdomain_report": lambda domains: [partial],
-                "process_chunks_for_internallinks": lambda args: ([], {}),
+                "process_chunks_for_internallinks": lambda args: ([], [], set(), [], {}),
             }))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             with self.assertLogs(level="INFO") as logs:
@@ -342,7 +368,7 @@ class CliTests(unittest.TestCase):
 
         def link_worker(args):
             seen_hosts.extend(args[0])
-            return links, set()
+            return links, [], set(), [], {}
 
         def page_worker(args):
             seen_pages.extend(args[0])
@@ -366,6 +392,48 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(), 0)
         self.assertCountEqual(seen_hosts, [root, "shop.example.com"])
         self.assertCountEqual(seen_pages, ["https://shop.example.com/", "https://shop.example.com/p?a=1"])
+
+    def test_every_url_is_requested_once_including_start_pages(self):
+        # The link stage reads each start page; the page stage must not request it again.
+        main = CLI["main"]
+        host = "shop.example.com"
+        start = f"https://{host}/"
+        synthetic_value = "SYNTHETIC" + "FIXTURE" * 2
+        for linked_page in (True, False):
+            site = {
+                start: ('<a href="/about">About</a>' if linked_page else "")
+                       + f'<script src="/app.js"></script><script>api_key = "{synthetic_value}";</script>',
+                start + "about": '<script src="/about.js"></script>',
+                start + "app.js": "console.log(1);",
+                start + "about.js": "console.log(2);",
+            }
+            requested = Counter()
+
+            def get(url, **kwargs):
+                requested[url] += 1
+                manager = MagicMock()
+                manager.__aenter__.return_value = http_response(200, site[url], {"Content-Type": "text/html"})
+                return manager
+
+            with self.subTest(linked_page=linked_page), TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(files, "OUTPUT_DIRECORY", Path(tmp)))
+                stack.enter_context(patch.object(files.ManageFiles, "get_domains", return_value=[host]))
+                stack.enter_context(patch.object(CLI["utils"], "get_workers", return_value=1))
+                stack.enter_context(patch.object(CLI["utils"], "configure_platform_settings"))
+                stack.enter_context(patch("aiohttp.ClientSession.get", new=Mock(side_effect=get)))
+                stack.enter_context(patch.dict(main.__globals__, {
+                    "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=10),
+                    "create_pool": ThreadPool, "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
+                }))
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                with self.assertLogs(level="INFO"):
+                    self.assertEqual(main(), 0)
+                report, = Path(tmp).glob("*.csv")
+                with report.open(encoding="utf-8", newline="") as stream:
+                    _, *rows = csv.reader(stream, delimiter=";")
+                expected = [start, start + "app.js"] + ([start + "about", start + "about.js"] if linked_page else [])
+                self.assertEqual(requested, Counter(expected))
+                self.assertEqual([row[:2] for row in rows], [[start.rstrip("/"), start.rstrip("/")]])
 
     def test_page_and_resource_stages_use_every_worker_without_sampling_requests(self):
         main = CLI["main"]
@@ -392,7 +460,7 @@ class CliTests(unittest.TestCase):
                 "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=100),
                 "ManageFiles": files_mock, "create_pool": ThreadPool,
                 "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
-                "process_chunks_for_internallinks": lambda args: (pages, set()),
+                "process_chunks_for_internallinks": lambda args: (pages, [], set(), [], {}),
                 "process_chunks_for_networksearch": page_worker,
                 "process_chunks_for_credentialsearch": resource_worker,
             }))
@@ -426,7 +494,7 @@ class CliTests(unittest.TestCase):
                 "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=100),
                 "ManageFiles": files_mock, "create_pool": ThreadPool,
                 "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
-                "process_chunks_for_internallinks": remember(([page], {})),
+                "process_chunks_for_internallinks": remember(([page], [], set(), [], {})),
                 "process_chunks_for_networksearch": remember(([utils.ScrapNetworkUrls(page, page + "app.js")], set(), [], {})),
                 "process_chunks_for_credentialsearch": remember(([], {}, [])),
             }))
@@ -451,7 +519,7 @@ class CliTests(unittest.TestCase):
                 "ManageFiles": files_mock, "create_pool": ThreadPool,
                 "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
                 "process_chunks_for_internallinks": lambda args: (
-                    [page], {"ok": 1, "redirect skipped": 2, "connect timeout": 3}),
+                    [page], [], set(), [], {"ok": 1, "redirect skipped": 2, "connect timeout": 3}),
                 "process_chunks_for_networksearch": lambda args: (
                     [utils.ScrapNetworkUrls(page, page + "app.js")], set(), [], {"ok": 1}),
                 "process_chunks_for_credentialsearch": lambda args: ([], {"ok": 4, "HTTP 429": 5}, []),
@@ -507,7 +575,7 @@ class CliTests(unittest.TestCase):
                 "parse_arguments": Mock(), "time": Mock(), "utils": utils,
                 "ManageFiles": files_mock, "create_pool": ThreadPool,
                 "scan_subdomain_report": lambda domains: [],
-                "process_chunks_for_internallinks": lambda _: (["https://example.invalid/"], set()),
+                "process_chunks_for_internallinks": lambda _: (["https://example.invalid/"], [], set(), [], {}),
                 "UrlPrioritizer": priorities,
             }))
             marker = "PRIVATEQUERYFIXTURE"

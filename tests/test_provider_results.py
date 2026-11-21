@@ -229,7 +229,7 @@ class ProviderCliTests(unittest.TestCase):
                 hosts = []
                 def links(args):
                     hosts.extend(args[0])
-                    return [], set()
+                    return [], [], set(), [], {}
                 stack.enter_context(patch.dict(main.__globals__, {
                     "ManageFiles": files, "time": Mock(perf_counter=time.perf_counter),
                     "parse_arguments": lambda: Mock(limit=5),

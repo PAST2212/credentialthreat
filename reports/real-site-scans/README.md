@@ -78,9 +78,36 @@ Of the 405 start pages not read in run 1, 276 failed DNS, 77 timed out while con
 | One page template produces most of the report | 62 pages on four white-label hosts each yield three rows (72 pages on five hosts in run 2). Two are AWS access-key IDs inside the `X-Amz-Credential` parameter of presigned S3 URLs. The third is a widget token. These rows account for 186 of 202 candidates in run 1 and 216 of 238 in run 2. The report keeps only origins, so the rows cannot be told apart. |
 | The log of the final URL selection is wrong | Prioritization printed `High Priority: 586 (100.0%)` and `Low Priority: 445` for a selection with 141 high-priority URLs. The code takes the high-priority list as the result and then extends it, so the log counts every selected URL as high priority. The selection itself is correct. |
 
-The first defect is fixed. Every connector now verifies certificates against the system's roots plus the public CA bundle, the same trust that run 2 used. With the previous context a request to each script host failed TLS, and with the new one both requests received HTTP responses. The scan was not repeated, because run 2 had already measured this configuration.
-
 No candidate in either run was a secret. Besides the classes above, the candidates were public identifiers: a map provider's public token (`pk.` followed by a JWT-shaped string) and a client-side API key of an identity service. The rest were enumeration-like words and an ID in code that is commented out. The candidates were classified by field name, length, character classes and JWT claim names. No value was printed.
+
+### After the fixes
+
+Two of the defects are fixed:
+
+- **TLS trust.** Every connector now verifies certificates against the system's roots plus the public CA bundle, the same trust that run 2 used. With the previous context a request to each script host failed TLS, and with the new one both requests received HTTP responses.
+- **Start pages.** The link stage now scans each start page as the page stage scans other pages, and the page stage skips every URL the link stage requested.
+
+Run 3 used the scanner with both fixes and the default settings. Discovery took 29 s instead of 10 s, because crt.sh answered more slowly, so the table compares the website stages only.
+
+| Site B | Run 2 | Run 3: both fixes |
+| --- | ---: | ---: |
+| Link stage: elapsed / worker CPU | 18.1 s / 3.3 s | 20.5 s / 7.8 s |
+| Link stage: connect timeouts / longest event-loop block | 76 / 0.06 s | 77 / 0.26 s |
+| Pages requested (read / error status / not read) | 649 (464 / 157 / 28) | 466 (433 / 5 / 28) |
+| Page stage: elapsed / worker CPU | 28.0 s / 88 s | 28.3 s / 92 s |
+| Resources requested / read | 1,117 / 1,085 | 1,119 / 1,083 |
+| Requests in all website stages | 2,344 | 2,163 |
+| Pages with candidates | 72 | 71 |
+| Peak RSS of the process tree | 724 MiB | 664 MiB |
+
+The website stages sent 181 fewer requests, most of them to start pages that answered with an error status. The scan did not get faster. The start pages added up to only 6.7 MB, and the page stage is bound by the CPU work on its large pages. Matching the start pages added 4.5 s of CPU to the link stage across the five workers. Its event loop was blocked for at most 0.26 s, far below the 5 s connect timeout, and the number of connect timeouts stayed the same. The link stage therefore still does not retry a connect timeout.
+
+Two classes of pages account for the one page with candidates fewer:
+
+- In run 2 the page stage scanned one start page twice: once by its own URL, and once through the host's root URL, which redirected to it.
+- Two support pages redirected to an in-scope login page in each run, but not the same two. Their redirects lead either to that login page or out of scope, and the choice changed from run to run.
+
+Eight page requests in run 3 still ended at a start page. Their URLs differ from the start URL, for example by a query string, and redirect to it.
 
 ### Coverage of scripts
 

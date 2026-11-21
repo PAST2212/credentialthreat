@@ -14,6 +14,7 @@ import tldextract
 from collections import Counter
 from credentialthreat.core.fetch import HostPacer, fetch_text, get_header
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
+from credentialthreat.core.networksearch import ScanerNetworkResources, ScrapNetworkUrls
 from credentialthreat.core.website import PublicDestinationConnector, canonical_url, is_binary_url
 from aiolimiter import AsyncLimiter
 
@@ -34,14 +35,19 @@ class ScanerInternalLinks:
         self.scope = tuple(scope)
         self.cancellation_manager = AsyncCancellationManager()
         self.outcomes: Counter = Counter()
+        # The page stage does not request the start pages again, so they are scanned here like any other page.
+        self.pages: set[str] = set()  # start URLs requested here, read or not, and their final URLs
+        self.resources: list[ScrapNetworkUrls] = []  # resources the start pages reference
+        self.candidates: list[tuple] = []  # redacted candidates in the start page texts
+        self.page_scanner = ScanerNetworkResources()  # only its parsing and rules are used; it sends no requests
 
-    async def _get_request(self, url: str, header: dict, session: aiohttp.ClientSession) -> Union[tuple[str, BeautifulSoup], None]:
-        """Final page URL and parsed HTML, or None when the page could not be read."""
+    async def _get_request(self, url: str, header: dict, session: aiohttp.ClientSession) -> Union[tuple[str, str, BeautifulSoup], None]:
+        """Final page URL, page text and parsed markup, or None when the page could not be read."""
         page = await fetch_text(session, url, header, scope=self.scope, limiter=self.rate_limiter,
                                 pacer=self.pacer, outcomes=self.outcomes)
         if page is None:
             return None
-        return page.url, BeautifulSoup(page.text, 'html.parser')
+        return page.url, page.text, self.page_scanner.parse(page)
 
     @staticmethod
     def _process_link(link: str, page_url: str) -> Union[str, None]:
@@ -59,10 +65,16 @@ class ScanerInternalLinks:
 
     async def _fetch_internal_links(self, domain: str, tld_extract: tldextract.tldextract.TLDExtract, header: dict, session: aiohttp.ClientSession):
         results: set = set()
+        start_url = 'https://' + domain + '/'
+        self.pages.add(start_url)
         try:
-            if fetched := await self._get_request('https://' + domain + '/', header, session):
-                page_url, soup = fetched
+            if fetched := await self._get_request(start_url, header, session):
+                page_url, text, soup = fetched
+                self.pages.add(page_url)
                 results.add(page_url)
+                resources, candidates = self.page_scanner.scan_page(page_url, text, soup, self.scope)
+                self.resources.extend(resources)
+                self.candidates.extend(candidates)
                 for anchor in soup.find_all('a'):
                     href = anchor.get("href")
                     if href:
@@ -99,8 +111,9 @@ class ScanerInternalLinks:
 
         return all_results
 
-    async def get_results(self, fqdns: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[set[str], dict[str, int]]:
-        """Links found on the hosts' start pages and the request outcome counts."""
+    async def get_results(self, fqdns: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[set[str], list[ScrapNetworkUrls], set[str], list[tuple], dict[str, int]]:
+        """Links found on the hosts' start pages, the resources these pages reference, the page URLs requested,
+        the redacted candidates in the page texts, and the request outcome counts."""
         logging.basicConfig(level=logging.INFO, format='%(message)s')
         results = await self.process_internal_links(fqdns=fqdns, tld_extract=tld_extract)
-        return results, dict(self.outcomes)
+        return results, self.resources, self.pages, self.candidates, dict(self.outcomes)

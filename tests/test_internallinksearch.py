@@ -27,6 +27,22 @@ class RootPageTests(unittest.IsolatedAsyncioTestCase):
         with unittest.mock.patch("asyncio.sleep"):
             self.assertEqual(await scanner._fetch_internal_links("example.com", PSL, {}, session), set())
         self.assertEqual(dict(scanner.outcomes), {"timeout": 1})
+        self.assertEqual(scanner.pages, {"https://example.com/"})  # requested, so the page stage skips it
+
+    async def test_start_page_is_scanned_like_any_other_page(self):
+        # The page stage does not request start pages again, so their resources and candidates are kept here.
+        session = session_returning(
+            response(302, "", {"Location": "https://www.example.com/de/"}),
+            response(200, '<a href="kontakt.html">Kontakt</a><script src="app.js"></script>'
+                          '<script>api_key = "SYNTHETICFIXTURE";</script>'),
+        )
+        scanner = ScanerInternalLinks(scope=["example.com"])
+        await scanner._fetch_internal_links("example.com", PSL, {}, session)
+        page = "https://www.example.com/de/"
+        self.assertEqual(scanner.pages, {"https://example.com/", page})
+        self.assertEqual([(item.origin_url, item.script_url) for item in scanner.resources], [(page, page + "app.js")])
+        self.assertEqual(scanner.candidates,
+                         [("https://www.example.com", "https://www.example.com", [("api_key", "[REDACTED]")])])
 
 
 class LinkResolutionTests(unittest.TestCase):
