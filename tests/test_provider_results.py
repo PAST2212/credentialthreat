@@ -97,6 +97,20 @@ class ProviderResultsTests(unittest.IsolatedAsyncioTestCase):
                     session.get.assert_called_once()
                     pause.assert_not_awaited()
 
+    async def test_crtsh_query_waits_until_crtsh_itself_gives_up(self):
+        # crt.sh answered a domain with 1,500 hosts after 14 to 64 s and ends a query itself with HTTP 504
+        # after 120 s. The discovery session allows 30 s, which cut off the large domains.
+        session = Mock()
+        session.get.return_value = FixtureResponse(EMPTY["crt.sh"])
+        result, = await ScanerCrtsh().get_report([HOST], session)
+        self.assertEqual(result.state, "empty")
+        timeout = session.get.call_args.kwargs.get("timeout")
+        self.assertIsInstance(timeout, aiohttp.ClientTimeout)
+        self.assertGreater(timeout.total, 120)
+        # An unreachable crt.sh still fails fast.
+        self.assertIsNotNone(timeout.connect)
+        self.assertLessEqual(timeout.connect, 30)
+
     async def test_hits_and_confirmed_empty_for_all_providers(self):
         for name in TYPES:
             with self.subTest(provider=name):

@@ -6,6 +6,10 @@ import aiohttp
 from credentialthreat.core.discovery import SubdomainProvider, UnexpectedFormat, require_ok
 from credentialthreat.core.website import host_in_scope
 
+# crt.sh answers a domain with many certificates only after its database query, which took 14 to 64 s for a
+# domain with 1,500 hosts. It ends a query itself with HTTP 504 after 120 s, so the client waits a little longer.
+QUERY_TIMEOUT = aiohttp.ClientTimeout(total=150, connect=10)
+
 
 class ScanerCrtsh(SubdomainProvider):
     name = "crt.sh"
@@ -14,7 +18,7 @@ class ScanerCrtsh(SubdomainProvider):
     @staticmethod
     async def _scrape_subdomains(session: aiohttp.ClientSession, domain: str) -> tuple[int, set[str]]:
         params = {"q": f"%.{domain}", "output": "json"}
-        async with session.get("https://crt.sh/", params=params) as response:
+        async with session.get("https://crt.sh/", params=params, timeout=QUERY_TIMEOUT) as response:
             require_ok(response.status)
             certificates = json.loads(await response.text())
         if not isinstance(certificates, list):
