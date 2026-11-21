@@ -147,7 +147,6 @@ class ScanerCredentials:
 
     async def process_credentials(self, network_files: list[tuple[str, str]]):
         connector = PublicDestinationConnector(
-            ssl=True,
             limit_per_host=self.host_connections,
             force_close=False,
             keepalive_timeout=300,

@@ -138,7 +138,6 @@ class ScanerNetworkResources:
 
     async def process_network_sources(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[list[ScrapNetworkUrls], list[tuple]]:
         connector = PublicDestinationConnector(
-            ssl=True,
             limit_per_host=self.host_connections,
             force_close=False,
             keepalive_timeout=300,

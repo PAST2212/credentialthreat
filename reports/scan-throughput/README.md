@@ -92,8 +92,9 @@ The intermediate runs show why the fixes depend on each other:
 ## Remaining limits
 
 - Pages were fetched in the resource stage and again in the credential stage. In Run A this accounted for 3,009 of 9,035 requests. A later change matches the page text in the resource stage and sends only the other resources to the credential stage, so each page is fetched once. [Measured effect](#fetching-each-page-once)
-- Peak memory is dominated by the worker processes, at about 360–560 MiB for the process tree with five workers. Each worker holds at most 50 bodies of up to 10 MB at once.
-- The scan follows links of the start pages only and does not execute JavaScript. Scripts loaded only from other scripts are not found.
+- The link stage reads each host's start page only for its links, and the page stage requests it again. On a production site this made up 168 of 586 page requests. [Real-site scans](../real-site-scans/README.md#defects-found)
+- Peak memory is dominated by the worker processes, at about 360–560 MiB for the process tree with five workers on these runs and up to 724 MiB on a production site with pages of up to 3 MB. Each worker holds at most 50 bodies of up to 10 MB at once.
+- The scan follows links of the start pages only and does not execute JavaScript. Modules that a script imports with a literal path or URL (`import ... from "./module.js"`, `import("/module.js")`) are fetched in up to five further rounds. Scripts whose URL is computed at runtime, for example by a tag manager or a widget loader, are not found. On a production home page the scanner read 12 of the 20 in-scope scripts a browser loaded. [Coverage of scripts](../real-site-scans/README.md#coverage-of-scripts)
 - `--limit` applies to the pages and to the other resources separately. Since pages are no longer fetched again, they no longer count against the resource cap.
 - One intermediate Windows run logged an asyncio `WinError 10022` while closing a TLS connection. The final runs did not reproduce it.
 - The measurement harness is not part of the repository. The offline tests cover each behavior listed above.

@@ -75,7 +75,6 @@ class ScanerInternalLinks:
 
     async def process_internal_links(self, fqdns: list[str], tld_extract: tldextract.tldextract.TLDExtract):
         connector = PublicDestinationConnector(
-            ssl=True,
             limit_per_host=self.host_connections,
             force_close=False,
             keepalive_timeout=300,

@@ -3,12 +3,9 @@
 import asyncio
 import csv
 from datetime import datetime, timedelta, timezone
-import os
-import ssl
 import sys
 
 import aiohttp
-from requests.certs import where as public_ca_bundle
 
 from credentialthreat.core.discovery import HttpStatusError, error_reason, require_ok
 from credentialthreat.core.website import PublicDestinationConnector
@@ -16,13 +13,6 @@ from credentialthreat.recon import mnemonic, urlscan
 
 
 PROVIDERS = (mnemonic, urlscan)
-
-
-def coverage_tls_context():
-    context = ssl.create_default_context()
-    if not (os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR")):
-        context.load_verify_locations(cafile=public_ca_bundle())
-    return context
 
 
 def utcnow():
@@ -147,7 +137,7 @@ async def run_coverage(domains, samples, source=None):
           f"measurement stops by {end.isoformat(timespec='minutes')}", file=sys.stderr, flush=True)
     writer = csv.writer(sys.stdout, lineterminator="\n")
     writer.writerow(("timestamp_utc", "sample", "domain", "source", "status", "count", "relation", "reason"))
-    async with aiohttp.ClientSession(connector=PublicDestinationConnector(ssl=coverage_tls_context()),
+    async with aiohttp.ClientSession(connector=PublicDestinationConnector(),
                                      cookie_jar=aiohttp.DummyCookieJar()) as session:
         # aiohttp 3.11 retries a disconnected GET internally, which would duplicate a sample.
         session._retry_connection = False

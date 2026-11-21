@@ -24,7 +24,7 @@ Always go through `discover -s tests`. `test_rule_benchmark.py` imports `credent
 1. **Discovery** (`core/subdomainsearch.py`) runs in the parent process. It queries crt.sh and RapidDNS for every configured domain and keeps only in-scope hosts.
 2. **Internal links** (`core/internallinksearch.py`) fetches each host's home page and collects its `<a href>` links.
 3. **Network resources** (`core/networksearch.py`) fetches each page once. It collects script, link, iframe and other resource URLs, plus the targets of inline module imports (`website.module_imports`) and of `require`, `importScripts` and `loadScript`. It also matches the credential rules (`ScanerCredentials._findings`) against the page text. Its worker returns `(resources, requested pages, redacted page candidates, outcomes)`.
-4. **Credentials** (`core/credentialsearch.py`) fetches each remaining resource and matches the credential rules against the response text. The CLI drops every URL that stage 3 requested, so a page is never fetched twice, and merges both candidate lists before writing the report. Its worker returns `(candidates, outcomes, imports)`. `imports` lists the in-scope modules that 2xx JavaScript responses import. The CLI fetches new ones in further rounds on the same pool, at most `IMPORT_ROUNDS` (5). `_next_imports` drops every URL already requested and counts the rest against `--limit`. When the limit cuts them, `UrlPrioritizer` decides which are kept, as in the first round.
+4. **Credentials** (`core/credentialsearch.py`) fetches each remaining resource and matches the credential rules against the response text. The CLI drops every URL that stage 3 requested, so stages 3 and 4 never fetch a page twice, and merges both candidate lists before writing the report. Start pages are the exception across stages: stage 2 reads them only for links, and stage 3 requests them again. Its worker returns `(candidates, outcomes, imports)`. `imports` lists the in-scope modules that 2xx JavaScript responses import. The CLI fetches new ones in further rounds on the same pool, at most `IMPORT_ROUNDS` (5). `_next_imports` drops every URL already requested and counts the rest against `--limit`. When the limit cuts them, `UrlPrioritizer` decides which are kept, as in the first round.
 
 Stages 2–4 share one pattern:
 
@@ -57,6 +57,8 @@ Every website request goes through `fetch_text` in `core/fetch.py`.
 - Every call adds exactly one entry to the scanner's `outcomes` counter.
 
 Scanners must not open requests any other way.
+
+`PublicDestinationConnector` verifies TLS with `shared_tls_context` from `core/website.py` unless a caller passes its own `ssl` context. That context holds the system's roots plus the CA bundle from `requests`. `SSL_CERT_FILE` or `SSL_CERT_DIR` replaces the bundle. On Windows aiohttp's default context holds only the roots Windows has already installed, because Python does not download missing roots the way Windows does. With it, a chain that needs such a root failed as `TLS`, even though the server was fine. On one production site this hit both script hosts. Loading the bundle takes about 0.25 s, and each import round opens new connectors, so each process builds the context once.
 
 Links and resource references are resolved with `urljoin` against the final page URL. `website.canonical_url` then reduces them to one spelling: http(s) only, no fragment or userinfo, and `/` for an empty path. `website.is_binary_url` drops binary file extensions. `website.resolve_reference` combines these steps with the scope check for page resources and imported modules alike. The CLI sorts the canonical page list before prioritizing it, so a URL limit is reproducible.
 
@@ -102,6 +104,7 @@ Rules live in `ScanerCredentials.__init__`:
 ## Invariants the tests enforce
 
 - **Destinations.** Every HTTP session uses `PublicDestinationConnector` from `core/website.py`. It rejects the whole DNS answer if any address is not public unicast.
+- **TLS.** Every session, discovery and `coverage` included, verifies certificates and trusts every root in the `requests` CA bundle.
 - **Redirects.** Website fetches use `allow_redirects=False` and never read a 3xx body. `fetch_text` follows a redirect itself, and only when the target is inside the scope. An out-of-scope target receives zero requests, and so does any target when no scope is set.
 - **Scope.** Scope checks go through `host_in_scope` and `url_in_scope`. A configured entry covers that host and its subdomains only.
 - **Domain parsing.** Use the shared `SUFFIXES` from `core/website.py` for registered-domain checks. It is the bundled public suffix list, including private suffixes, and never fetches the list over the network. Do not construct a new `TLDExtract`.

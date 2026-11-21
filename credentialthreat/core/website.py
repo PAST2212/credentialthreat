@@ -1,8 +1,12 @@
+import functools
 from ipaddress import IPv4Address, IPv4Network, IPv6Network, ip_address
+import os
 import re
+import ssl
 from urllib.parse import urljoin
 
 import aiohttp
+from requests.certs import where as public_ca_bundle
 import tldextract
 from yarl import URL
 
@@ -36,7 +40,29 @@ class DestinationBlocked(OSError):
     """The DNS answer failed the public destination check."""
 
 
+def load_tls_context() -> ssl.SSLContext:
+    """The system's roots plus the public CA bundle that `requests` ships, unless SSL_CERT_FILE or SSL_CERT_DIR is set.
+
+    On Windows Python reads only the roots Windows has already installed, while Windows itself downloads missing
+    ones on demand. A valid chain that needs such a root would otherwise fail verification.
+    """
+    context = ssl.create_default_context()
+    if not (os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR")):
+        context.load_verify_locations(cafile=public_ca_bundle())
+    return context
+
+
+@functools.cache
+def shared_tls_context() -> ssl.SSLContext:
+    """One context per process, because loading the bundle takes about 0.25 s."""
+    return load_tls_context()
+
+
 class PublicDestinationConnector(aiohttp.TCPConnector):
+    def __init__(self, *args, ssl=True, **kwargs):
+        # `True` is aiohttp's verified default context; verify against the wider trust store instead.
+        super().__init__(*args, ssl=shared_tls_context() if ssl is True else ssl, **kwargs)
+
     async def _resolve_host(self, host, port, traces=None):
         # In the pinned aiohttp this also returns literal IPs and DNS-cache hits.
         # Returning these same records avoids a second resolution before connecting.

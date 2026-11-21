@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import runpy
 import ssl
@@ -9,13 +10,25 @@ import tldextract
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from bs4 import BeautifulSoup
+from requests.certs import where as public_ca_bundle
 
+from credentialthreat.core import website
+from credentialthreat.core.subdomainsearch import SubdomainScanner
 from http_doubles import response as http_response
 
 
 CLI = runpy.run_path(str(Path(__file__).resolve().parents[1] / "credentialthreat.py"))
 SITE = "https://docs.example.com"
 PSL = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
+
+
+def untrusted_bundle_roots(context: ssl.SSLContext) -> list[str]:
+    """Names of the roots in the public CA bundle that `context` does not trust."""
+    bundle = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    bundle.load_verify_locations(cafile=public_ca_bundle())
+    trusted = context.get_ca_certs()
+    return [dict(field[0] for field in root["subject"]).get("commonName", "?")
+            for root in bundle.get_ca_certs() if root not in trusted]
 
 
 def session_returning(status, body, headers=None):
@@ -76,6 +89,64 @@ class WebsiteSafetyTests(unittest.IsolatedAsyncioTestCase):
         for context in contexts:
             self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
             self.assertTrue(context.check_hostname)
+
+    async def test_every_session_trusts_the_public_ca_bundle(self):
+        # Python reads only the roots Windows has installed; chains that need another root failed as TLS.
+        real_session = aiohttp.ClientSession
+        contexts = []
+
+        def record_session(**kwargs):
+            session = real_session(**kwargs)
+            contexts.append(session.connector._get_ssl_context(Mock(ssl=True)))
+            return session
+
+        async def discovery():
+            scanner = SubdomainScanner()
+            await scanner.session
+            await scanner.close()
+
+        stages = {
+            "links": CLI["ScanerInternalLinks"]().process_internal_links([], PSL),
+            "pages": CLI["ScanerNetworkResources"]().process_network_sources([], ["example.com"], PSL),
+            "resources": CLI["ScanerCredentials"]().process_credentials([]),
+            "discovery": discovery(),
+        }
+        with patch.dict(os.environ), patch.object(aiohttp, "ClientSession", side_effect=record_session):
+            for key in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+                os.environ.pop(key, None)
+            for name, scan in stages.items():
+                with self.subTest(stage=name):
+                    await scan
+                    context = contexts.pop()
+                    self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+                    missing = untrusted_bundle_roots(context)
+                    self.assertEqual(missing, [], f"{len(missing)} bundle roots not trusted")
+
+    async def test_connectors_in_one_process_reuse_one_tls_context(self):
+        # Loading the bundle takes about 0.25 s, and each import round opens a new connector in every worker.
+        first, second = website.PublicDestinationConnector(), website.PublicDestinationConnector()
+        try:
+            self.assertIs(first._get_ssl_context(Mock(ssl=True)), second._get_ssl_context(Mock(ssl=True)))
+        finally:
+            await first.close()
+            await second.close()
+
+    def test_tls_context_adds_the_bundle_only_without_an_explicit_store(self):
+        with patch.dict(os.environ):
+            for key in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+                os.environ.pop(key, None)
+            for variable in (None, "SSL_CERT_FILE", "SSL_CERT_DIR"):
+                if variable:
+                    os.environ[variable] = public_ca_bundle()
+                context = Mock()
+                with self.subTest(variable=variable), patch("ssl.create_default_context", return_value=context):
+                    self.assertIs(website.load_tls_context(), context)
+                    if variable:
+                        context.load_verify_locations.assert_not_called()
+                    else:
+                        context.load_verify_locations.assert_called_once_with(cafile=public_ca_bundle())
+                if variable:
+                    del os.environ[variable]
 
     async def test_each_website_session_limits_connections_per_host_to_the_worker_share(self):
         real_session = aiohttp.ClientSession

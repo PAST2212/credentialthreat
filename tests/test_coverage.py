@@ -136,28 +136,28 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual([r["source"] for r in rows], ["urlscan.io"])
         self.assertEqual(len(calls), 2)  # quota plus one search
 
-    def test_coverage_connector_verifies_tls_with_public_roots_and_respects_custom_ca(self):
+    def test_coverage_connector_verifies_tls_with_public_roots(self):
+        # The shared context and its SSL_CERT_FILE/SSL_CERT_DIR handling are tested in test_website_safety.
         from credentialthreat.core import coverage
         from requests.certs import where
         real_connector = coverage.PublicDestinationConnector
-        with patch.object(coverage, "PublicDestinationConnector", wraps=real_connector) as connector:
-            self.assertEqual(self.cli()[0], 0)
-            tls = connector.call_args.kwargs["ssl"]
-            self.assertTrue(tls.check_hostname)
-            self.assertEqual(tls.verify_mode, ssl.CERT_REQUIRED)
-        with patch.dict(os.environ, {}, clear=False):
+        connectors = []
+
+        def record(*args, **kwargs):
+            connectors.append(real_connector(*args, **kwargs))
+            return connectors[-1]
+
+        with patch.dict(os.environ), patch.object(coverage, "PublicDestinationConnector", side_effect=record):
             for key in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
                 os.environ.pop(key, None)
-            for custom in (False, True):
-                if custom:
-                    os.environ["SSL_CERT_FILE"] = where()
-                ctx = Mock()
-                with self.subTest(custom=custom), patch("ssl.create_default_context", return_value=ctx):
-                    self.assertIs(coverage.coverage_tls_context(), ctx)
-                    if custom:
-                        ctx.load_verify_locations.assert_not_called()
-                    else:
-                        ctx.load_verify_locations.assert_called_once_with(cafile=where())
+            self.assertEqual(self.cli()[0], 0)
+        tls = connectors[0]._get_ssl_context(Mock(ssl=True))
+        self.assertTrue(tls.check_hostname)
+        self.assertEqual(tls.verify_mode, ssl.CERT_REQUIRED)
+        bundle = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        bundle.load_verify_locations(cafile=where())
+        trusted = tls.get_ca_certs()
+        self.assertTrue(all(root in trusted for root in bundle.get_ca_certs()))
 
     def test_a_disconnected_request_is_not_silently_repeated(self):
         from credentialthreat.core import coverage
