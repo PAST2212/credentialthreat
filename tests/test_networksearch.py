@@ -99,6 +99,23 @@ class ResourceExtractionTests(unittest.TestCase):
             with self.subTest(markup=markup):
                 self.assertEqual(extracted(markup, attr), expected)
 
+    def test_link_elements_count_only_when_the_browser_loads_them(self):
+        # A production help page listed 108 translations of itself as <link rel="alternate" hreflang>, next to three
+        # stylesheets. Following them sent 80,643 HTML pages, 88% of all requests, to the resource stage.
+        html = ('<link rel="alternate" hreflang="de-de" href="/de-de/p/1">'
+                '<link rel="alternate" hreflang="fr-fr" href="/fr-fr/p/1">'
+                '<link rel="alternate" type="application/rss+xml" href="/feed.xml">'
+                '<link rel="canonical" href="/p/1-canonical"><link rel="next" href="/p/2">'
+                '<link rel="preconnect" href="https://static.example.com"><link rel="dns-prefetch" href="//api.example.com">'
+                '<link rel="stylesheet" href="/css/site.css"><link rel="preload" as="script" href="/js/boot.js">'
+                '<link rel="modulepreload" href="/js/module.mjs"><link rel="prefetch" href="/js/later.js">'
+                '<link rel="manifest" href="/site.webmanifest"><link rel="Stylesheet Preload" href="/css/two.css">')
+        resources, _ = ScanerNetworkResources().scan_page(PAGE, html, BeautifulSoup(html, "html.parser"), ["example.com"])
+        self.assertCountEqual([item.script_url for item in resources], [
+            "https://www.example.com/css/site.css", "https://www.example.com/js/boot.js",
+            "https://www.example.com/js/module.mjs", "https://www.example.com/js/later.js",
+            "https://www.example.com/site.webmanifest", "https://www.example.com/css/two.css"])
+
     def test_binary_and_out_of_scope_references_are_dropped(self):
         for markup, attr in (('<link href="/img/logo.png">', "href"),
                              ('<link href="//cdn.other.invalid/a.js">', "href"),

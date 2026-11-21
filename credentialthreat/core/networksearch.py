@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
+# <link> elements whose target the browser loads with the page. The others name further documents (alternate,
+# canonical, next) or only an origin (preconnect, dns-prefetch): one help page listed 108 translations of itself.
+LOADED_LINK_RELS = frozenset({"stylesheet", "preload", "modulepreload", "prefetch", "manifest"})
+
 
 @dataclass
 class ScrapNetworkUrls:
@@ -109,6 +113,8 @@ class ScanerNetworkResources:
             results.extend(self._extract_url(script, 'data-src', url, domains_input, None))
 
         for resource in soup.find_all(['link', 'iframe', 'frame', 'embed', 'object']):
+            if resource.name == "link" and LOADED_LINK_RELS.isdisjoint(rel.lower() for rel in resource.get("rel") or ()):
+                continue
             for attr in ['href', 'src', 'data', 'data-src']:
                 results.extend(self._extract_url(resource, attr, url, domains_input, None))
 
