@@ -26,9 +26,13 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
-# <link> elements whose target the browser loads with the page. The others name further documents (alternate,
-# canonical, next) or only an origin (preconnect, dns-prefetch): one help page listed 108 translations of itself.
-LOADED_LINK_RELS = frozenset({"stylesheet", "preload", "modulepreload", "prefetch", "manifest"})
+
+def is_translation(link) -> bool:
+    """A <link rel="alternate" hreflang> names the page in another language, with the same scripts and values.
+
+    One help page listed 108 translations of itself; following them made translations 88% of a scan's resources.
+    """
+    return bool(link.get("hreflang")) and "alternate" in (rel.lower() for rel in link.get("rel") or ())
 
 
 @dataclass
@@ -113,7 +117,7 @@ class ScanerNetworkResources:
             results.extend(self._extract_url(script, 'data-src', url, domains_input, None))
 
         for resource in soup.find_all(['link', 'iframe', 'frame', 'embed', 'object']):
-            if resource.name == "link" and LOADED_LINK_RELS.isdisjoint(rel.lower() for rel in resource.get("rel") or ()):
+            if resource.name == "link" and is_translation(resource):
                 continue
             for attr in ['href', 'src', 'data', 'data-src']:
                 results.extend(self._extract_url(resource, attr, url, domains_input, None))
