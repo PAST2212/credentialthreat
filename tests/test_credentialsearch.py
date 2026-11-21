@@ -87,20 +87,22 @@ class MatcherTests(unittest.TestCase):
     def test_assignment_rule_does_not_scan_text_case_insensitively(self):
         # Case-insensitive matching of the field-name alternation costs about 1.5 s per MB of script
         # and blocks the worker's event loop meanwhile. Compare on this machine, not against a fixed time.
+        # The runs alternate and the fastest of each counts, so a busy machine slows both sides alike.
+        # The new matcher is about 7x faster; the test asks for 2x.
         scanner = ScanerCredentials()
-        text = minified_script(300_000)
+        text = minified_script(120_000)
 
-        def best(run):
-            durations = []
-            for _ in range(3):
-                start = time.perf_counter()
-                run()
-                durations.append(time.perf_counter() - start)
-            return min(durations)
+        def timed(run):
+            start = time.perf_counter()
+            run()
+            return time.perf_counter() - start
 
-        previous = best(lambda: case_insensitive_findings(scanner, text))
-        current = best(lambda: scanner._findings(text))
-        self.assertLess(current, previous / 2, f"_findings took {current:.3f}s, case-insensitive {previous:.3f}s")
+        previous, current = [], []
+        for _ in range(5):
+            previous.append(timed(lambda: case_insensitive_findings(scanner, text)))
+            current.append(timed(lambda: scanner._findings(text)))
+        self.assertLess(min(current), min(previous) / 2,
+                        f"_findings took {min(current):.3f}s, case-insensitive {min(previous):.3f}s")
 
 
 class HostPausePerWorkerTests(unittest.IsolatedAsyncioTestCase):

@@ -24,7 +24,7 @@ Always go through `discover -s tests`. `test_rule_benchmark.py` imports `credent
 1. **Discovery** (`core/subdomainsearch.py`) runs in the parent process. It queries crt.sh and RapidDNS for every configured domain and keeps only in-scope hosts.
 2. **Internal links** (`core/internallinksearch.py`) fetches each host's home page and collects its `<a href>` links.
 3. **Network resources** (`core/networksearch.py`) fetches each page once. It collects script, link, iframe and other resource URLs, plus the targets of inline module imports (`website.module_imports`) and of `require`, `importScripts` and `loadScript`. It also matches the credential rules (`ScanerCredentials._findings`) against the page text. Its worker returns `(resources, requested pages, redacted page candidates, outcomes)`.
-4. **Credentials** (`core/credentialsearch.py`) fetches each remaining resource and matches the credential rules against the response text. The CLI drops every URL that stage 3 requested, so a page is never fetched twice, and merges both candidate lists before writing the report. Its worker returns `(candidates, outcomes, imports)`. `imports` lists the in-scope modules that 2xx JavaScript responses import. The CLI fetches new ones in further rounds on the same pool, at most `IMPORT_ROUNDS` (5). `_next_imports` drops every URL already requested and counts the rest against `--limit`.
+4. **Credentials** (`core/credentialsearch.py`) fetches each remaining resource and matches the credential rules against the response text. The CLI drops every URL that stage 3 requested, so a page is never fetched twice, and merges both candidate lists before writing the report. Its worker returns `(candidates, outcomes, imports)`. `imports` lists the in-scope modules that 2xx JavaScript responses import. The CLI fetches new ones in further rounds on the same pool, at most `IMPORT_ROUNDS` (5). `_next_imports` drops every URL already requested and counts the rest against `--limit`. When the limit cuts them, `UrlPrioritizer` decides which are kept, as in the first round.
 
 Stages 2–4 share one pattern:
 
@@ -48,7 +48,7 @@ The workers have to survive multiprocessing:
 Every website request goes through `fetch_text` in `core/fetch.py`.
 
 - It follows redirects only to targets inside the scope, for up to three hops. Without a scope it follows none.
-- It retries 429 and 503 responses (honouring `Retry-After`, capped at 30 s), read timeouts and dropped connections. It does not retry other connection errors. It retries connect timeouts only up to `connect_retries`. The page and resource scanners pass 1 and the link scanner passes 0. CPU-bound work can block a worker's event loop past `sock_connect` (5 s). The expired timer then fires before the finished connection is processed, so a connection that succeeded becomes a connect timeout. `BlockedLoopTests` reproduces this. In the link stage most connect timeouts are dead hosts.
+- It retries 429 and 503 responses (honouring `Retry-After`, capped at 30 s), read timeouts and dropped connections. It does not retry other connection errors. It retries connect timeouts only up to `connect_retries`. The page and resource scanners pass 1 and the link scanner passes 0. CPU-bound work can block a worker's event loop past `sock_connect` (5 s). The expired timer then fires before the finished connection is processed, so a connection that succeeded becomes a connect timeout. `BlockedLoopTests` reproduces this by holding the loop inside a patched `loop.sock_connect`. In the link stage most connect timeouts are dead hosts. A retried connect timeout does not count against `MAX_ATTEMPTS`.
 - `connection_failure` names the cause of a request that never got a response: `DNS`, `destination blocked`, `TLS` or `connection`. These names match the discovery reasons.
 - Each scanner owns a `HostPacer`, which hands out the worker's per-host request slots (`connections`). Requests beyond the share wait in `pacer.slot` before reaching aiohttp, because aiohttp counts time spent waiting for a pooled connection against the 45 s total timeout. The pacer also paces requests per host. A 429 or 503 pauses the host and halves its rate, and other responses raise it again. Without it, the parallel workers multiplied the load on throttling servers and lost more pages than the old single-worker stage did. Tests inject a `FakeClock` (in `tests/http_doubles.py`) into `scanner.pacer`. Patching only `asyncio.sleep` leaves the pacer on the real clock.
 - It skips binary content types without reading the body and cuts bodies at 10 MB.
@@ -58,7 +58,7 @@ Every website request goes through `fetch_text` in `core/fetch.py`.
 
 Scanners must not open requests any other way.
 
-Links and resource references are resolved with `urljoin` against the final page URL. `website.canonical_url` then reduces them to one spelling: http(s) only, no fragment or userinfo, and `/` for an empty path. `website.is_binary_url` drops binary file extensions. The CLI sorts the canonical page list before prioritizing it, so a URL limit is reproducible.
+Links and resource references are resolved with `urljoin` against the final page URL. `website.canonical_url` then reduces them to one spelling: http(s) only, no fragment or userinfo, and `/` for an empty path. `website.is_binary_url` drops binary file extensions. `website.resolve_reference` combines these steps with the scope check for page resources and imported modules alike. The CLI sorts the canonical page list before prioritizing it, so a URL limit is reproducible.
 
 Import direction matters, because a test checks that each scanner module imports in a fresh interpreter:
 
@@ -79,7 +79,7 @@ Exit codes are:
 
 A website-discovery provider subclasses `SubdomainProvider` in `core/discovery.py` and implements `_scrape_subdomains(session, domain) -> (record_count, hosts)`. Register it in `SUBDOMAIN_SERVICES` in `core/subdomainsearch.py`.
 
-A provider that states its total can return `(record_count, hosts, stated_total)`. RapidDNS does this, because without an account it lists only 100 records. `QueryResult.available` holds the total. When it exceeds `records`, `log_query_summary` adds a `partial=N (...)` warning. A partial answer does not count as a failed query, so the exit code stays the same.
+A provider that states its total can return `(record_count, hosts, stated_total)`. RapidDNS does this, because without an account it lists only 100 records. `QueryResult.available` holds the total. When it exceeds `records`, `QueryResult.partial` is true. `log_query_summary` then adds a `partial=N (...)` warning, and `_write_scan_report` repeats it after the report. A partial answer does not count as a failed query, so the exit code stays the same.
 
 - Raise `UnexpectedFormat` for a response the provider does not recognize, even with HTTP 200. Do not return an empty set for it.
 - Call `require_ok` for HTTP status checks.

@@ -24,6 +24,11 @@ class QueryResult:
     available: int | None = None  # records the provider states it holds; above `records`, the answer is partial
 
     @property
+    def partial(self) -> bool:
+        """The provider states more records than it returned (for example without an account)."""
+        return self.available is not None and self.records is not None and self.available > self.records
+
+    @property
     def state(self) -> str:
         if self.reason is not None:
             return "error"
@@ -116,7 +121,7 @@ def log_query_summary(results: list[QueryResult]) -> bool:
         counts.setdefault(result.provider, Counter())[result.state] += 1
         if result.reason is not None:
             reasons.setdefault(result.provider, Counter())[result.reason] += 1
-        if result.available is not None and result.records is not None and result.available > result.records:
+        if result.partial:
             queries, returned, stated = partial.get(result.provider, (0, 0, 0))
             partial[result.provider] = (queries + 1, returned + result.records, stated + result.available)
     for provider, count in counts.items():

@@ -2,7 +2,6 @@
 
 import re
 import asyncio
-from urllib.parse import urljoin
 from dataclasses import dataclass
 import logging
 import warnings
@@ -18,8 +17,8 @@ from bs4 import XMLParsedAsHTMLWarning
 from credentialthreat.core.credentialsearch import ScanerCredentials
 from credentialthreat.core.fetch import HostPacer, fetch_text, get_header
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
-from credentialthreat.core.website import (PublicDestinationConnector, canonical_url, is_binary_url, module_imports,
-                                           report_origin, url_in_scope)
+from credentialthreat.core.website import (PublicDestinationConnector, canonical_url, module_imports, report_origin,
+                                           resolve_reference, url_in_scope)
 
 
 logger = logging.getLogger(__name__)
@@ -50,7 +49,8 @@ class ScanerNetworkResources:
 
     async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, tuple[str, str, BeautifulSoup]]:
         """Final page URL, page text and parsed markup, or None when the page could not be read."""
-        # Hosts here answered before, so a connect timeout is more likely a blocked event loop than a dead host.
+        # Parsing or matching another page can block this worker's loop past sock_connect and turn a connection
+        # that succeeded into a connect timeout, so retry once (a dead host costs one more connect timeout).
         page = await fetch_text(session, url, header, scope=self.scope, limiter=self.rate_limiter,
                                 pacer=self.pacer, outcomes=self.outcomes, connect_retries=1)
         if page is None:
@@ -85,18 +85,10 @@ class ScanerNetworkResources:
             logger.error("URL normalization failed (%s)", type(e).__name__)
             return url
 
-    @staticmethod
-    def _resolve(base_url: str, reference: str, domains_input: list[str]) -> str | None:
-        """Absolute, fragment-free, in-scope URL of a text resource, or None."""
-        full_url = canonical_url(urljoin(base_url, reference))
-        if full_url and url_in_scope(full_url, domains_input) and not is_binary_url(full_url):
-            return full_url
-        return None
-
     def _extract_url(self, element: BeautifulSoup, attr: str, base_url: str, domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> list[ScrapNetworkUrls]:
         results = []
         if url := element.attrs.get(attr):
-            if full_url := self._resolve(base_url, self._clean_url(url), domains_input):
+            if full_url := resolve_reference(base_url, self._clean_url(url), domains_input):
                 results.append(ScrapNetworkUrls(base_url, full_url))
         return results
 
@@ -136,7 +128,7 @@ class ScanerNetworkResources:
                                         r'loadScript\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)'):
                             references.extend(match.group(1) for match in re.finditer(pattern, script_text))
                         for reference in references:
-                            if imported_url := self._resolve(url, reference, domains_input):
+                            if imported_url := resolve_reference(url, reference, domains_input):
                                 results.append(ScrapNetworkUrls(url, imported_url))
 
         except Exception:

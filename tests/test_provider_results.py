@@ -161,6 +161,12 @@ class ProviderResultsTests(unittest.IsolatedAsyncioTestCase):
         unstated = await self.query("RapidDNS", HITS["RapidDNS"])
         self.assertIsNone(unstated.available)
 
+    async def test_rapiddns_total_is_read_only_beside_its_label(self):
+        # Without a count beside the label, a later number on the page must not be taken for the total.
+        body = "<div>Total: <b>5</b></div>" + HITS["RapidDNS"] + "<footer><span>2025</span></footer>"
+        result = await self.query("RapidDNS", body)
+        self.assertIsNone(result.available)
+
     def test_partial_results_are_a_warning_but_not_a_failed_query(self):
         results = [QueryResult("RapidDNS", HOST, 100, frozenset([CHILD]), available=10891),
                    QueryResult("RapidDNS", "other.example", 3, frozenset(["a.other.example"]), available=3)]

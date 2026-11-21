@@ -293,12 +293,42 @@ class CliTests(unittest.TestCase):
         self.assertEqual(pools, 3)
         self.assertIn("Credential scan requests: ok=3, skipped=0", output)
 
-    def test_imported_modules_count_against_the_resource_limit(self):
+    def test_imported_modules_count_against_the_resource_limit_by_priority(self):
         page = "https://shop.example.com/"
-        imports = {page + "app.js": [(page, page + name) for name in ("c.js", "a.js", "b.js")]}
+        imports = {page + "app.js": [(page, page + name) for name in ("c.js", "a-icons.js", "auth-config.js")]}
         rounds, _, output = self.run_with_imports(imports, limit=2)
-        self.assertEqual(rounds, [[page + "app.js"], [page + "a.js"]])
+        self.assertEqual(rounds, [[page + "app.js"], [page + "auth-config.js"]])
         self.assertIn("2 imported modules skipped by the URL limit", output)
+
+    def test_import_chains_stop_after_the_round_limit(self):
+        page = "https://shop.example.com/"
+        chain = [page + f"m/{index}.js" for index in range(CLI["IMPORT_ROUNDS"] + 3)]
+        imports = {page + "app.js": [(page, chain[0])]}
+        imports.update({module: [(page, chain[index + 1])] for index, module in enumerate(chain[:-1])})
+        rounds, _, output = self.run_with_imports(imports, limit=100)
+        self.assertEqual(len(rounds), 1 + CLI["IMPORT_ROUNDS"])
+        self.assertIn(f"1 imported modules not followed: imports nested deeper than {CLI['IMPORT_ROUNDS']} rounds", output)
+
+    def test_partial_discovery_is_noted_when_the_report_is_written(self):
+        main = CLI["main"]
+        host = "shop.example.com"
+        files_mock = Mock()
+        files_mock.return_value.get_domains.return_value = [host]
+        partial = QueryResult("RapidDNS", host, 100, frozenset([host]), available=10891)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(CLI["utils"], "get_workers", return_value=1))
+            stack.enter_context(patch.object(CLI["utils"], "configure_platform_settings"))
+            stack.enter_context(patch.dict(main.__globals__, {
+                "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=10),
+                "ManageFiles": files_mock, "create_pool": ThreadPool, "scan_subdomain_report": lambda domains: [partial],
+                "process_chunks_for_internallinks": lambda args: ([], {}),
+            }))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertLogs(level="INFO") as logs:
+                self.assertEqual(main(), 0)
+        output = "\n".join(logs.output)
+        self.assertIn("Report written with partial discovery", output)
+        self.assertNotIn("incomplete discovery", output)
 
     def test_each_host_and_page_enters_its_stage_once(self):
         main = CLI["main"]

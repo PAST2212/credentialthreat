@@ -13,7 +13,7 @@ TOTAL_LABEL = re.compile(r"^\s*Total:\s*$")
 def _stated_total(soup: BeautifulSoup) -> int | None:
     """The record count RapidDNS states above its table. Without an account the table lists only 100 of them."""
     label = soup.find(string=TOTAL_LABEL)
-    count = label.find_next("span") if label else None
+    count = label.parent.find("span") if label else None  # only the count beside the label, never a later number
     text = count.get_text(strip=True).replace(",", "") if count else ""
     return int(text) if text.isdigit() else None
 

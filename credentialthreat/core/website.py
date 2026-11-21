@@ -1,5 +1,6 @@
 from ipaddress import IPv4Address, IPv4Network, IPv6Network, ip_address
 import re
+from urllib.parse import urljoin
 
 import aiohttp
 import tldextract
@@ -97,6 +98,14 @@ def is_binary_url(value: str) -> bool:
     except (ValueError, UnicodeError, TypeError):
         return False
     return "." in name and name.rsplit(".", 1)[-1].lower() in BINARY_EXTENSIONS
+
+
+def resolve_reference(base_url: str, reference: str, scope) -> str | None:
+    """Absolute, canonical, in-scope URL of a text resource that `base_url` references, or None."""
+    full_url = canonical_url(urljoin(base_url, reference))
+    if full_url and url_in_scope(full_url, scope) and not is_binary_url(full_url):
+        return full_url
+    return None
 
 
 # Static (`import ... from`, `export ... from`, `import "x"`) and dynamic (`import("x")`) ES module imports whose

@@ -218,6 +218,7 @@ async def fetch_text(session, url: str, headers: dict, *, scope=(), limiter=None
                 if connect_timeouts > connect_retries:
                     outcomes["connect timeout"] += 1
                     return None
+                attempt -= 1  # the retry does not use up the attempts for 429/503 and read timeouts
             except (asyncio.TimeoutError, aiohttp.ServerDisconnectedError, aiohttp.ClientPayloadError) as exc:
                 if attempt >= MAX_ATTEMPTS:
                     outcomes["timeout" if isinstance(exc, asyncio.TimeoutError) else "connection"] += 1

@@ -109,17 +109,21 @@ IMPORT_ROUNDS = 5  # rounds of imported modules after the first credential round
 
 
 def _next_imports(imported, requested: set, domains, budget: int) -> tuple[list[tuple[str, str]], int]:
-    """In-scope modules not requested yet, sorted and capped at `budget`, and how many the cap left out."""
+    """In-scope modules not requested yet, capped at `budget` by priority, and how many the cap left out."""
     new = {}
     for origin, url in imported:
         if url not in requested and url not in new and url_in_scope(origin, domains) and url_in_scope(url, domains):
             new[url] = origin
     selected = [(origin, url) for url, origin in sorted(new.items())]
     budget = max(0, budget)
-    return selected[:budget], len(selected[budget:])
+    if len(selected) <= budget:
+        return selected, 0
+    # Like the first round, the limit keeps the URL patterns most likely to expose credentials.
+    kept = UrlPrioritizer().prioritize_urls(urls=selected, limit=budget) if budget else []
+    return kept, len(selected) - len(kept)
 
 
-def _write_scan_report(leaks, status):
+def _write_scan_report(leaks, status, partial_discovery=False):
     candidates = sum(len(matches) for _, _, matches in leaks)
     logging.info("Unverified credential matches: %d (affected resources: %d)", candidates, len(leaks))
     logging.info(Fore.RED + '\nStart Writing Results to .csv file in data/output folder' + Style.RESET_ALL)
@@ -127,6 +131,9 @@ def _write_scan_report(leaks, status):
     print(Fore.GREEN + 'End Writing Results to .csv file in data/output folder\n' + Style.RESET_ALL)
     if status:
         logging.warning("Report written with incomplete discovery")
+    if partial_discovery:
+        # Not a failure (the exit code stays), but the report covers fewer hosts than the providers know.
+        logging.warning("Report written with partial discovery: a provider returned only part of its records")
     return status
 
 
@@ -171,6 +178,7 @@ def _run_scan(killer):
             report = scan_subdomain_report(domains=domains)
             if log_query_summary(report):
                 status = 1
+            partial_discovery = any(result.partial for result in report)
             subdomains = [host for host in combined_values(report) if host_in_scope(host, domains)]
             logging.info("Discovered subdomains in scope: %d", len(subdomains))
             logging.info(FG + 'End Subdomain Scan' + S)
@@ -217,7 +225,7 @@ def _run_scan(killer):
         host_names_scaled = UrlPrioritizer().prioritize_urls(urls=host_names_normalized, limit=url_limit)
         logging.info(FG + "End Internal URL Scan\n" + S)
         if not host_names_scaled:
-            return _write_scan_report([], status)
+            return _write_scan_report([], status, partial_discovery)
 
         process_chunks = [(chunk, domains, SUFFIXES, host_connections)
                           for chunk in utils.plan_chunks(host_names_scaled, num_processes)]
@@ -269,7 +277,7 @@ def _run_scan(killer):
         logging.info(FG + f'End Network Resource Scan: {end1-start1:.2f} Seconds needed' + S)
 
         if not network_files_scaled:
-            return _write_scan_report(leaks, status)
+            return _write_scan_report(leaks, status, partial_discovery)
 
         worker = partial(process_chunks_for_credentialsearch)
 
@@ -284,7 +292,7 @@ def _run_scan(killer):
         start2 = time.perf_counter()
         logging.info(FY + f"\nStarting Credential Scan:"
                           f"\n├── Total URLs: {len(network_files_scaled):,}"
-                          f"\n├── Total Chunks: {len(utils.plan_chunks(network_files_scaled, num_processes))}"
+                          f"\n├── Total Chunks: {min(len(network_files_scaled), max(1, num_processes))}"
                           f"\n└── CPU Cores: {num_processes}\n" + S)
         try:
             with killer.defer_pool_signals(), create_pool(processes=num_processes) as pool:
@@ -320,7 +328,7 @@ def _run_scan(killer):
 
         end2 = time.perf_counter()
         logging.info(FG + f"End Credential Leak Candidates Scan: {end2 - start2:.2f} Seconds needed\n" + S)
-        return _write_scan_report(leaks, status)
+        return _write_scan_report(leaks, status, partial_discovery)
 
     except Exception as e:
         logging.error("Unexpected error in main process (%s)", type(e).__name__)

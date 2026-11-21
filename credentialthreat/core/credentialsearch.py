@@ -5,13 +5,12 @@ import asyncio
 import logging
 from typing import Union
 from collections import Counter
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 import aiohttp
 from aiolimiter import AsyncLimiter
 from credentialthreat.core.fetch import HostPacer, Page, fetch_text, get_header
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
-from credentialthreat.core.website import (PublicDestinationConnector, canonical_url, is_binary_url, module_imports,
-                                           report_origin, url_in_scope)
+from credentialthreat.core.website import PublicDestinationConnector, module_imports, report_origin, resolve_reference
 
 
 logger = logging.getLogger(__name__)
@@ -119,8 +118,7 @@ class ScanerCredentials:
         if not is_script or not 200 <= page.status < 300:
             return
         for specifier in module_imports(page.text):
-            url = canonical_url(urljoin(page.url, specifier))
-            if url and url_in_scope(url, self.scope) and not is_binary_url(url):
+            if url := resolve_reference(page.url, specifier, self.scope):
                 self.imports.add((origin_url, url))
 
     def _findings(self, data: str) -> list[tuple[str, str]]:
@@ -136,7 +134,8 @@ class ScanerCredentials:
 
     async def _get_request(self, url_tuple: tuple[str, str], header, session: aiohttp.ClientSession) -> Union[None, tuple[str, str, list[tuple]]]:
         origin_url, script_url = url_tuple
-        # Resources come from pages that loaded, so a connect timeout is more likely a blocked event loop.
+        # Matching another resource can block this worker's loop past sock_connect and turn a connection that
+        # succeeded into a connect timeout, so retry once (a dead host costs one more connect timeout).
         page = await fetch_text(session, script_url, header, scope=self.scope, limiter=self.rate_limiter,
                                 pacer=self.pacer, outcomes=self.outcomes, connect_retries=1)
         if page is None or not page.text:

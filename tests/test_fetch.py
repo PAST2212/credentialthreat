@@ -4,7 +4,7 @@ import socket
 import ssl
 import time
 import unittest
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import aiohttp
 from aiohttp import web
@@ -127,6 +127,14 @@ class FetchTests(unittest.IsolatedAsyncioTestCase):
         page = await self.fetch(session, connect_retries=1)
         self.assertEqual(page.text, "ok")
         self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(self.outcomes, Counter({"ok": 1}))
+
+    async def test_connect_timeout_retry_leaves_the_other_attempts_intact(self):
+        session = session_returning(aiohttp.ConnectionTimeoutError(), asyncio.TimeoutError(), asyncio.TimeoutError(),
+                                    response(200, "ok"))
+        page = await self.fetch(session, connect_retries=1)
+        self.assertEqual(page.text, "ok")
+        self.assertEqual(session.get.call_count, 4)
         self.assertEqual(self.outcomes, Counter({"ok": 1}))
 
     async def test_connect_timeout_retries_are_bounded(self):
@@ -255,20 +263,32 @@ class BlockedLoopTests(unittest.IsolatedAsyncioTestCase):
         runner = web.AppRunner(app)
         await runner.setup()
         self.addAsyncCleanup(runner.cleanup)
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        url = "http://127.0.0.1:%d/" % site._server.sockets[0].getsockname()[1]
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        await web.SockSite(runner, listener).start()
+        url = "http://127.0.0.1:%d/" % listener.getsockname()[1]
+
+        loop = asyncio.get_running_loop()
+        connect = loop.sock_connect
+        blocked = []
+
+        async def connect_then_block(sock, address):
+            # The TCP connection succeeds; then the loop is held inside the sock_connect window, as by a
+            # long parse or match in another task. Only the first connection is held.
+            await connect(sock, address)
+            if not blocked:
+                blocked.append(address)
+                time.sleep(0.5)
+
         timeout = aiohttp.ClientTimeout(total=10, sock_read=5, sock_connect=0.2)
         for retries, expected in ((0, Counter({"connect timeout": 1})), (1, Counter({"ok": 1}))):
-            with self.subTest(connect_retries=retries):
+            with self.subTest(connect_retries=retries), patch.object(loop, "sock_connect", connect_then_block):
+                blocked.clear()
                 outcomes = Counter()
                 async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True), timeout=timeout) as session:
-                    request = asyncio.ensure_future(fetch_text(session, url, {}, outcomes=outcomes, connect_retries=retries))
-                    await asyncio.sleep(0)
-                    await asyncio.sleep(0)
-                    time.sleep(0.5)  # the loop is blocked while the connection is made
-                    await request
+                    await fetch_text(session, url, {}, outcomes=outcomes, connect_retries=retries)
                 self.assertEqual(outcomes, expected)
+                self.assertEqual(len(blocked), 1)
 
 
 if __name__ == "__main__":
