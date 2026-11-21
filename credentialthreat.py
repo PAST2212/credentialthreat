@@ -26,7 +26,8 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 DISCOVERY_LIMITS = (
     "Published request limits for website discovery\n"
     "  crt.sh HTTPS (per IP, published 2023-06-09): 5/minute, hour unknown, day unknown\n"
-    "  RapidDNS web search (per public IP): 30/minute, hour unknown, day unknown"
+    "  RapidDNS web search (per public IP): 30/minute, hour unknown, day unknown\n"
+    "  AnubisDB API (per source IP): 360/minute (60 per 10 seconds), hour unknown, day unknown"
 )
 
 

@@ -9,6 +9,7 @@ from tqdm import tqdm
 import aiohttp
 from credentialthreat.core.discovery import QueryResult, combined_values, error_reason
 from credentialthreat.core.website import PublicDestinationConnector
+from credentialthreat.recon.anubisdb import ScanerAnubisDb
 from credentialthreat.recon.crtsh import ScanerCrtsh
 from credentialthreat.recon.rapiddns import ScanerRapidDns
 
@@ -27,6 +28,10 @@ SUBDOMAIN_SERVICES = {
     },
     'rapiddns': {
         'scanner': ScanerRapidDns,
+        'rate_limit': 10
+    },
+    'anubisdb': {
+        'scanner': ScanerAnubisDb,
         'rate_limit': 10
     },
 }

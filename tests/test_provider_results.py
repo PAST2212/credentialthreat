@@ -15,7 +15,8 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from credentialthreat.core.discovery import QueryResult, log_query_summary
-from credentialthreat.core.subdomainsearch import SubdomainScanner
+from credentialthreat.core.subdomainsearch import SUBDOMAIN_SERVICES, SubdomainScanner
+from credentialthreat.recon.anubisdb import ScanerAnubisDb
 from credentialthreat.recon.crtsh import ScanerCrtsh
 from credentialthreat.recon.rapiddns import ScanerRapidDns
 
@@ -29,14 +30,17 @@ TABLE_END = "</tbody></table>"
 EMPTY = {
     "crt.sh": "[]",
     "RapidDNS": TABLE_HEAD + "<tbody>" + TABLE_END,
+    "AnubisDB": "[]",
 }
 HITS = {
     "crt.sh": json.dumps([{"name_value": "*." + CHILD}]),
     "RapidDNS": TABLE_HEAD + "<tbody><tr><th>1</th><td>" + CHILD + "</td><td>192.0.2.1</td><td>A</td><td>2025</td></tr>" + TABLE_END,
+    "AnubisDB": json.dumps([CHILD]),
 }
 TYPES = {
     "crt.sh": ScanerCrtsh,
     "RapidDNS": ScanerRapidDns,
+    "AnubisDB": ScanerAnubisDb,
 }
 
 
@@ -75,7 +79,8 @@ class ProviderResultsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_server_error_is_retried_once_after_the_providers_pause(self):
         # crt.sh publishes 5 requests per minute, RapidDNS 30: the pause keeps the retry within them.
-        for name, minimum_pause in (("crt.sh", 12), ("RapidDNS", 2)):
+        # AnubisDB publishes 60 requests per 10 seconds.
+        for name, minimum_pause in (("crt.sh", 12), ("RapidDNS", 2), ("AnubisDB", 1)):
             with self.subTest(provider=name):
                 session = Mock()
                 session.get.side_effect = [FixtureResponse(PRIVATE, 502), FixtureResponse(HITS[name])]
@@ -136,6 +141,7 @@ class ProviderResultsTests(unittest.IsolatedAsyncioTestCase):
         for name, bodies in {
             "crt.sh": ["{}", '[{"name_value":" "}]', json.dumps([{"name_value": CHILD}, {"different": PRIVATE}])],
             "RapidDNS": ['<table id="table"></table>', TABLE_HEAD + '<tbody><tr><td>challenge</td></tr>' + TABLE_END],
+            "AnubisDB": ['{"error":"Invalid domain"}', "[1]", json.dumps([CHILD, None])],
         }.items():
             for body in bodies:
                 with self.subTest(provider=name, body=body):
@@ -161,9 +167,10 @@ class ProviderResultsTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError(PRIVATE)
             with patch.object(coordinator, "scan_with_rate_limit", new=provider_batch):
                 combined = await coordinator.tasks_subdomains(["unavailable.example", "empty.example", HOST])
-        self.assertEqual(len(combined), 6)
+        # One result per provider and domain; each failing provider batch marks its three domains as errors.
+        self.assertEqual(len(combined), 3 * len(SUBDOMAIN_SERVICES))
         self.assertEqual([q.values for q in combined if q.state == "hits"], [{CHILD}])
-        self.assertEqual(sum(q.state == "error" for q in combined), 4)
+        self.assertEqual(sum(q.state == "error" for q in combined), 1 + 3 * (len(SUBDOMAIN_SERVICES) - 1))
 
     async def test_rapiddns_reports_how_many_records_it_holds(self):
         # Without an account RapidDNS shows 100 rows and states the full total above the table.
@@ -201,6 +208,7 @@ class ProviderCliTests(unittest.TestCase):
         for service, details in (
             ("crt.sh HTTPS", ("per IP", "2023-06-09", " 5/minute,")),
             ("RapidDNS web search", ("per public IP", " 30/minute,")),
+            ("AnubisDB API", ("per source IP", " 360/minute (60 per 10 seconds),")),
         ):
             line = next((line for line in output.splitlines() if service in line), "")
             self.assertTrue(line, f"Missing request limits for {service}")
@@ -215,7 +223,7 @@ class ProviderCliTests(unittest.TestCase):
         self.assertEqual(end.exception.code, 0)
         self.assert_discovery_limits(console.getvalue())
 
-    def test_cli_queries_only_crtsh_and_rapiddns_and_reports_their_outcomes(self):
+    def test_cli_queries_only_its_discovery_providers_and_reports_their_outcomes(self):
         for scenario in ("empty", "partial", "malformed", "filtered"):
             with self.subTest(scenario=scenario), ExitStack() as stack:
                 main = CLI["main"]
@@ -234,9 +242,15 @@ class ProviderCliTests(unittest.TestCase):
                         if scenario == "filtered":
                             return FixtureResponse(HITS["RapidDNS"].replace(CHILD, "other.example"))
                         return FixtureResponse(EMPTY["RapidDNS"])
+                    if provider == "anubisdb.com":
+                        if scenario == "malformed":
+                            return FixtureResponse('{"error":"Invalid domain"}')
+                        return FixtureResponse('["' + CHILD + '"]' if scenario == "partial" else "[]")
                     raise AssertionError("unexpected request")
 
                 fetch = stack.enter_context(patch.object(aiohttp.ClientSession, "get", side_effect=request))
+                # AnubisDB accepts submissions; the scanner must never send it the names it discovered.
+                submit = stack.enter_context(patch.object(aiohttp.ClientSession, "post", side_effect=AssertionError))
                 utils = CLI["utils"]
                 for attr, value in (("get_workers", 1), ("configure_platform_settings", None)):
                     stack.enter_context(patch.object(utils, attr, return_value=value))
@@ -258,7 +272,8 @@ class ProviderCliTests(unittest.TestCase):
                     code = main()
                 output = " ".join(logs.output) + console.getvalue()
                 requested_hosts = [urlsplit(call.args[0]).hostname for call in fetch.call_args_list]
-                self.assertCountEqual(requested_hosts, ["crt.sh", "rapiddns.io"])
+                self.assertCountEqual(requested_hosts, ["crt.sh", "rapiddns.io", "anubisdb.com"])
+                submit.assert_not_called()
                 self.assert_discovery_limits(output)
                 self.assertNotIn("wayback", output.lower())
                 self.assertNotIn("threatcrowd", output.lower())
@@ -266,6 +281,10 @@ class ProviderCliTests(unittest.TestCase):
                 self.assertEqual(code, int(incomplete))
                 self.assertEqual("Report written with incomplete discovery" in output, incomplete)
                 self.assertIn("crt.sh: hits=1" if scenario == "partial" else "crt.sh: hits=0 empty=1", output)
+                if scenario == "malformed":
+                    self.assertIn("AnubisDB: hits=0 empty=0 filtered=0 errors=1 (unexpected format=1)", output)
+                else:
+                    self.assertIn("AnubisDB: hits=1" if scenario == "partial" else "AnubisDB: hits=0 empty=1", output)
                 if scenario == "malformed":
                     self.assertIn("RapidDNS: hits=0 empty=0 filtered=0 errors=1 (unexpected format=1)", output)
                 elif scenario == "filtered":

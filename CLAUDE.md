@@ -21,7 +21,7 @@ Always go through `discover -s tests`. `test_rule_benchmark.py` imports `credent
 
 `_run_scan` in `credentialthreat.py` runs these stages in order:
 
-1. **Discovery** (`core/subdomainsearch.py`) runs in the parent process. It queries crt.sh and RapidDNS for every configured domain and keeps only in-scope hosts.
+1. **Discovery** (`core/subdomainsearch.py`) runs in the parent process. It queries crt.sh, RapidDNS and AnubisDB for every configured domain and keeps only in-scope hosts.
 2. **Internal links** (`core/internallinksearch.py`) fetches each host's start page and collects its `<a href>` links. It also scans the start page as stage 3 scans other pages, through `ScanerNetworkResources.parse` and `scan_page`. Its worker returns `(links, resources, requested pages, redacted page candidates, outcomes)`. The CLI drops the requested pages from stage 3's input, so stage 3 never fetches a start page again.
 3. **Network resources** (`core/networksearch.py`) fetches each page once. It collects script, link, iframe and other resource URLs, plus the targets of inline module imports (`website.module_imports`) and of `require`, `importScripts` and `loadScript`. It also matches the credential rules (`ScanerCredentials._findings`) against the page text. Its worker returns `(resources, requested pages, redacted page candidates, outcomes)`.
 4. **Credentials** (`core/credentialsearch.py`) fetches each remaining resource and matches the credential rules against the response text. The CLI drops every URL that stages 2 and 3 requested, so no page is fetched twice, and merges the candidate lists of stages 2–4 before writing the report. Its worker returns `(candidates, outcomes, imports)`. `imports` lists the in-scope modules that 2xx JavaScript responses import. The CLI fetches new ones in further rounds on the same pool, at most `IMPORT_ROUNDS` (5). `_next_imports` drops every URL already requested and counts the rest against `--limit`. When the limit cuts them, `UrlPrioritizer` decides which are kept, as in the first round.
@@ -86,7 +86,9 @@ A provider that states its total can return `(record_count, hosts, stated_total)
 - Raise `UnexpectedFormat` for a response the provider does not recognize, even with HTTP 200. Do not return an empty set for it.
 - Call `require_ok` for HTTP status checks.
 - `observe` turns each query into a `QueryResult` in one of four states: `hits`, `empty` (a confirmed zero), `filtered` or `error`. The summary log and the exit code depend on those states.
-- `SubdomainProvider._query` repeats a query once when it fails with an HTTP 5xx status, after the class's `retry_pause`. That pause is 15 s for crt.sh and 5 s for RapidDNS, which keeps the retry within their published per-minute limits. Tests patch `asyncio.sleep` to skip the pause.
+- `SubdomainProvider._query` repeats a query once when it fails with an HTTP 5xx status, after the class's `retry_pause`. That pause is 15 s for crt.sh and 5 s for RapidDNS and AnubisDB, which keeps the retry within their published limits. Tests patch `asyncio.sleep` to skip the pause.
+- The discovery session allows 30 s per request. crt.sh answers large domains only after its database query (up to about a minute) and gives up itself after 120 s, so its requests carry their own 150 s timeout (`QUERY_TIMEOUT` in `recon/crtsh.py`).
+- Providers only read. AnubisDB accepts submissions, and the CLI provider test fails on any `ClientSession.post` call.
 
 `recon/dnsdumpster.py` and `recon/subdomaincenter.py` are legacy and not registered. Only a diagnostics test still imports them.
 
