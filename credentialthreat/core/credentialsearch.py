@@ -111,9 +111,11 @@ class ScanerCredentials:
         # Add additional specific patterns for special cases
         self.additional_patterns = {
             # A JWS or JWE header always names its algorithm. Depending on its byte offset modulo 3, the key "alg":
-            # encodes as ImFsZyI6, JhbGciO or iYWxnIj. Other base64 JSON, such as a signed {"v":"1"} link
-            # parameter that filled a production report, is not a JWT.
-            'jwt': r'(?=[A-Za-z0-9_-]*?(?:ImFsZyI6|JhbGciO|iYWxnIj))eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*',
+            # encodes as ImFsZyI6, JhbGciO or iYWxnIj; as the first key it starts the header as eyJhbGciO. Other
+            # base64 JSON, such as a signed {"v":"1"} link parameter that filled a production report, is not a JWT.
+            # The literal eyJ comes first, so the lookahead runs only where a header starts, not at every
+            # position of a long base64 run.
+            'jwt': r'eyJ(?=hbGciO|[A-Za-z0-9_-]*?(?:ImFsZyI6|JhbGciO|iYWxnIj))[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*',
             'private_key': (r'-----BEGIN (?P<kind>(?:RSA )?PRIVATE KEY)-----'
                             r'[A-Za-z0-9\s/+=]+-----END (?P=kind)-----'),
             # Not the key ID of a presigned S3 URL, plain or URL-encoded: such a URL is made to be handed out.

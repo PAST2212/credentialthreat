@@ -192,6 +192,30 @@ class MatcherTests(unittest.TestCase):
                 token = f"{segment(header)}.{payload}.{signature}"
                 self.assertEqual(scanner._findings(f'<a href="/x?dib={token}&dib_tag=se">'), [])
 
+    def test_long_base64_run_costs_no_more_to_match_than_ordinary_text(self):
+        # Pages embed images and fonts as base64. A rule that tries a lookahead at every position of such a run
+        # takes quadratic time: a 40 KB run blocked matching for 9.5 s. Keep the fastest of alternating runs.
+        import base64
+        import random
+
+        scanner = ScanerCredentials()
+        rng = random.Random(7)
+        blob = base64.urlsafe_b64encode(bytes(rng.getrandbits(8) for _ in range(30_000))).decode()
+        words = minified_script(300_000)
+        with_blob = words[:-len(blob)] + blob
+
+        def timed(text):
+            start = time.perf_counter()
+            scanner._findings(text)
+            return time.perf_counter() - start
+
+        plain_times, blob_times = [], []
+        for _ in range(3):
+            plain_times.append(timed(words))
+            blob_times.append(timed(with_blob))
+        self.assertLess(min(blob_times), min(plain_times) * 2 + 0.05,
+                        f"with base64 run {min(blob_times):.3f}s, without {min(plain_times):.3f}s")
+
     def test_assignment_rule_does_not_scan_text_case_insensitively(self):
         # Case-insensitive matching of the field-name alternation costs about 1.5 s per MB of script
         # and blocks the worker's event loop meanwhile. Compare on this machine, not against a fixed time.
