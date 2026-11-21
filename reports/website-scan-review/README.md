@@ -8,7 +8,7 @@ The general rule looks for a named field and a quoted value. Separate rules reco
 
 ## Offline precision and recall
 
-Run `python tests/measure_rules.py` from the checkout. The benchmark scores the matcher on 37 synthetic HTML responses. It bypasses discovery and HTTP. Before measuring, the author labeled 31 rule occurrences by rule, page and exact half-open source span. Of these, 24 simulate findings the owner wants to review and seven represent deliberately published examples. A position labeled for two rules contributes once to each. A duplicate cannot claim a second true positive. Precision is TP / (TP + FP), recall is TP / (TP + FN), and an empty denominator prints `n/a`.
+Run `python tests/measure_rules.py` from the checkout. The benchmark scores the matcher on 38 synthetic HTML responses. It bypasses discovery and HTTP. Before measuring, the author labeled 31 rule occurrences by rule, page and exact half-open source span. Of these, 24 simulate findings the owner wants to review and seven represent deliberately published examples. A position labeled for two rules contributes once to each. A duplicate cannot claim a second true positive. Precision is TP / (TP + FP), recall is TP / (TP + FN), and an empty denominator prints `n/a`.
 
 **Owner-review results.** Before and after use the same pages and annotations. FP and FN page names refer to the current matcher. The command also prints their character offsets.
 
@@ -24,7 +24,12 @@ Run `python tests/measure_rules.py` from the checkout. The benchmark scores the 
 
 The two missed assignments are in JSON configuration. In `mixed-config`, a correctly recognized documentation example and a missed review-worthy value occur at different positions. They count as one FP and one FN for owner review. Some example and review pages have byte-identical HTML, so response text alone cannot distinguish their intended use. The fixtures use inert placeholders and a small selection of field names. These figures describe this fixed corpus only. The corpus file had SHA-256 `057b87194f80afb7262143fd316dbe9c7f02a2565e439908b53614a7277be45a` with LF line endings at both measurements.
 
-A later page, `next-property`, holds no target. It reproduces a false positive from a production site, where the assignment rule ran from `withCredentials` across a comma into the next property's value. The rule matched it until its separator stopped admitting commas. With that page the corpus file has SHA-256 `f4102db82e24cecda4a3495b7c9db92554463d6b7c4da8cdb62170394b5ec5c6` with LF line endings, and every score above is unchanged.
+Later pages hold no target. Each reproduces a false positive from a production site, and each scored as one until the rule changed:
+
+- `next-property`: the assignment rule ran from `withCredentials` across a comma into the next property's value, until its separator stopped admitting commas.
+- `id-presigned-url`: the AWS rule matched the access key ID in the `X-Amz-Credential` parameter of a presigned S3 URL, which is made to be handed out. The rule now skips an ID that directly follows `X-Amz-Credential=` or its URL-encoded form.
+
+With these pages the corpus file has SHA-256 `ded71666b93febe8c678a27d3a37d6d4823b2f7589e11a34a50d3a8d269277e4` with LF line endings, and every score above is unchanged.
 
 ## Verified defects and changes
 

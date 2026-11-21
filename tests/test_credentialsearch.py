@@ -106,6 +106,21 @@ class MatcherTests(unittest.TestCase):
         self.assertLess(min(non_ascii_times), min(ascii_times) * 1.2,
                         f"non-ASCII {min(non_ascii_times):.3f}s, ASCII {min(ascii_times):.3f}s")
 
+    def test_access_key_id_of_a_presigned_url_is_not_a_candidate(self):
+        # A presigned S3 URL is made to be handed out, and carries its key ID in X-Amz-Credential. On one
+        # production site such IDs made two of every three report rows.
+        scanner = ScanerCredentials()
+        key_id = "AKIA" + "TEST" * 4
+        for sample in (f"a.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&amp;amp;X-Amz-Credential={key_id}%2F20260101%2Fs3",
+                       f"proxy?url=https%3A%2F%2Fb.example%2Fa.png%3FX-Amz-Credential%3D{key_id}%252F20260101"):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [])
+        for sample, label in ((f"<span>{key_id}</span>", "aws_keys"),
+                              (f'aws_access_key_id = "{key_id}"', "aws_access + aws_keys"),
+                              (f"Authorization: AWS4-HMAC-SHA256 Credential={key_id}/20260101/s3", "aws_keys")):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [(label, "[REDACTED]")])
+
     def test_fetch_credentials_mode_is_not_a_candidate(self):
         # The Fetch API option credentials: "same-origin" was every match on one production site.
         scanner = ScanerCredentials()

@@ -82,6 +82,8 @@ PAGES = (
     page("id-manual", '<span>', Target(ID, K, example=True), '</span>'),
     page("id-empty", '<p>identifier withheld</p>'),
     page("id-truncated", '<code>', ID[:9], '</code>'),
+    page("id-presigned-url", '<img src="https://fixture.invalid/a.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&amp;X-Amz-Credential=',
+         ID, '%2F20260101%2Feu-west-1%2Fs3%2Faws4_request&amp;X-Amz-Signature=FIXTURE">'),
     page("same-position", '<script>api_key="', Target(ID, ("assignment", "aws_keys")), '";</script>'),
     page("empty-page", ""),
     page("ordinary-text", "<p>Account settings are available in the menu.</p>"),

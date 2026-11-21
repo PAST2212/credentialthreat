@@ -112,7 +112,8 @@ class ScanerCredentials:
             'jwt': r'eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*',
             'private_key': (r'-----BEGIN (?P<kind>(?:RSA )?PRIVATE KEY)-----'
                             r'[A-Za-z0-9\s/+=]+-----END (?P=kind)-----'),
-            'aws_keys': r'AKIA[0-9A-Z]{16}'
+            # Not the key ID of a presigned S3 URL, plain or URL-encoded: such a URL is made to be handed out.
+            'aws_keys': r'(?<!X-Amz-Credential=)(?<!X-Amz-Credential%3D)(?<!X-Amz-Credential%3d)AKIA[0-9A-Z]{16}'
         }
 
         self.max_concurrent_requests = max_concurrent_requests
