@@ -88,12 +88,19 @@ class HostPacer:
             self.rates[host] = min(self.start, rate + self.start / 32)
 
 
-def is_bot_challenge(status: int, headers) -> bool:
-    """True for an error response that a bot-management service marks as a challenge instead of content.
+ANUBIS_TEST_COOKIE = re.compile(r"^\s*[^=;]*-anubis-cookie-verification=", re.IGNORECASE)
 
-    Kasada sends its challenge with an ``x-kpsdk-ct`` token, Cloudflare with ``cf-mitigated: challenge``.
-    A challenge page only loads the service's script, which is fetched anew under a unique URL every time.
+
+def is_bot_challenge(status: int, headers) -> bool:
+    """True for a response that a bot-management service marks as a challenge instead of content.
+
+    Kasada sends its challenge with an ``x-kpsdk-ct`` token, Cloudflare with ``cf-mitigated: challenge``, both with an
+    error status. A challenge page only loads the service's script, which is fetched anew under a unique URL every time.
+    Anubis answers with HTTP 200 and sets a ``<prefix>-anubis-cookie-verification`` cookie to test cookie support.
     """
+    cookies = headers.getall("Set-Cookie", ()) if hasattr(headers, "getall") else ()
+    if any(ANUBIS_TEST_COOKIE.match(cookie) for cookie in cookies):
+        return True
     if 200 <= status < 300:
         return False
     return "x-kpsdk-ct" in headers or (headers.get("cf-mitigated") or "").strip().lower() == "challenge"

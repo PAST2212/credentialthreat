@@ -248,6 +248,28 @@ class FetchTests(unittest.IsolatedAsyncioTestCase):
                 self.sleep.assert_not_awaited()
                 self.assertEqual(self.outcomes, Counter({"bot challenge": 1}))
 
+    async def test_anubis_challenge_answered_with_200_is_a_bot_challenge(self):
+        # Anubis (Techaro) answers with HTTP 200 and a proof-of-work page without site content. It sets a cookie
+        # to test cookie support; the prefix is "techaro.lol" by default and site-specific otherwise.
+        for cookies in (
+            [("Set-Cookie", "techaro.lol-anubis-auth=; Path=/"),
+             ("Set-Cookie", "techaro.lol-anubis-cookie-verification=0199a; Path=/")],
+            [("Set-Cookie", "uni-web-anubis-cookie-verification=0199a; Path=/; Domain=example.org; Secure")],
+        ):
+            with self.subTest(cookies=cookies):
+                challenge = response(200, '<script src="/.within.website/x/cmd/anubis/static/js/main.mjs"></script>',
+                                     [("Content-Type", "text/html; charset=utf-8"), *cookies])
+                session = session_returning(challenge)
+                self.assertIsNone(await self.fetch(session))
+                self.assertEqual(challenge.content.reads, 0)
+                self.assertEqual(self.outcomes, Counter({"bot challenge": 1}))
+
+    async def test_other_cookies_do_not_mark_a_page_as_challenge(self):
+        page = await self.fetch(session_returning(response(200, "<html>ok</html>", [
+            ("Set-Cookie", "anubis-theme=dark; Path=/"), ("Set-Cookie", "session=1; Path=/")])))
+        self.assertEqual(page.text, "<html>ok</html>")
+        self.assertEqual(self.outcomes, Counter({"ok": 1}))
+
     async def test_challenge_headers_on_a_normal_page_do_not_skip_it(self):
         page = await self.fetch(session_returning(response(200, "<html>ok</html>", {"x-kpsdk-ct": "token"})))
         self.assertEqual(page.text, "<html>ok</html>")
