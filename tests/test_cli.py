@@ -279,7 +279,7 @@ class CliTests(unittest.TestCase):
         # limit keeps the alphabetically first ones.
         main = CLI["main"]
         utils = CLI["utils"]
-        host = "oracle.example"
+        host = "miracle.example"
         page = f"https://www.{host}/"
         links = [f"https://www.{host}/a/about", f"https://www.{host}/z/admin/"]
         resources = [f"https://www.{host}/a/app.css", f"https://www.{host}/z/secret-settings.css"]

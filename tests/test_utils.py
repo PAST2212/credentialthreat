@@ -23,9 +23,9 @@ class PrioritizerTests(unittest.TestCase):
         self.assertEqual(pick(resources, 1), [resources[1]])
 
     def test_the_scanned_domain_itself_does_not_raise_a_url_priority(self):
-        # Patterns such as `amazon` or `acl` matched the configured domain (amazon.com, oracle.com), so every URL
-        # of such a scan ranked high and a URL limit kept them in alphabetical order.
-        for domain in ("amazon.com", "oracle.com"):
+        # A pattern contained in the configured domain (`key` in keystone.example, `acl` in miracle.example) ranked every
+        # URL of a production scan high, and a URL limit kept them in alphabetical order.
+        for domain in ("keystone.example", "miracle.example"):
             with self.subTest(domain=domain), patch("logging.info"):
                 page = f"https://www.{domain}/"
                 resources = [(page, f"https://www.{domain}/a/app.css"), (page, f"https://www.{domain}/z/secret-settings.css")]

@@ -323,8 +323,8 @@ class UrlPrioritizer:
     def _match_target(url: str, scope=()) -> str:
         """The URL without query string or fragment, and without the configured domain in its host name.
 
-        The configured domain is in every URL of a scan, so a pattern it contains (`amazon` in amazon.com, `acl`
-        in oracle.com) would rank every URL high and leave a URL limit to the alphabet.
+        The configured domain is in every URL of a scan, so a pattern it contains (`key` in keystone.example, `acl`
+        in miracle.example) would rank every URL high and leave a URL limit to the alphabet.
         """
         target = url.split("#", 1)[0].split("?", 1)[0]
         scheme, separator, rest = target.partition("://")

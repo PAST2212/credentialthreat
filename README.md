@@ -17,7 +17,7 @@ Find leaked credentials and sensitive data (e.g., tokens, API keys) based on URL
 - Configurable URL Scan Limit (default: 100,000)
 
 ### Scanning Strategy
-- **URL Prioritization**: URLs are prioritized based on their likelihood of containing sensitive data. The patterns are matched without the configured domain, so a domain such as amazon.com, which contains the pattern `amazon`, does not rank all of its URLs high
+- **URL Prioritization**: URLs are prioritized based on their likelihood of containing sensitive data. The patterns are matched without the configured domain, so a domain such as keystone.example, which contains the pattern `key`, does not rank all of its URLs high
 - **Pattern Categories**:
   - High-Risk Patterns (API keys, tokens, passwords)
   - Cloud Service Credentials
