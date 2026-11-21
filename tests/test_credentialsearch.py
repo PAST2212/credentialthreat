@@ -84,6 +84,23 @@ class MatcherTests(unittest.TestCase):
                 self.assertEqual(case_insensitive_findings(scanner, sample), [])
         self.assertEqual(scanner._findings('credentials = "same-origin-FIXTUREONLY"'), [("credentials", "[REDACTED]")])
 
+    def test_assignment_does_not_run_into_the_next_property(self):
+        # On one production site, `withCredentials:this.withCredentials,requestType:"…"` was a credentials candidate:
+        # the separator after the field name ran across the comma into the next property's value.
+        scanner = ScanerCredentials()
+        for sample in ('x={withCredentials:this.withCredentials,requestType:"arraybuffer"}',
+                       'e.withCredentials=t.withCredentials,e.responseType="arraybuffer"',
+                       'init = { credentials: options.credentials, mode: "navigate-fixture" }'):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [])
+                self.assertEqual(case_insensitive_findings(scanner, sample), [])
+        for sample, label in (('config={credentials:"FIXTUREONLYVALUE"}', "credentials"),
+                              ('awsCredentials = "FIXTUREONLYVALUE"', "credentials"),
+                              ('api_key_prod = "FIXTUREONLYVALUE"', "api_key"),
+                              ('client_secret.value = "FIXTUREONLYVALUE"', "client_secret")):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [(label, "[REDACTED]")])
+
     def test_assignment_rule_does_not_scan_text_case_insensitively(self):
         # Case-insensitive matching of the field-name alternation costs about 1.5 s per MB of script
         # and blocks the worker's event loop meanwhile. Compare on this machine, not against a fixed time.

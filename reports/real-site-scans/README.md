@@ -82,14 +82,15 @@ No candidate in either run was a secret. Besides the classes above, the candidat
 
 ### After the fixes
 
-Two of the defects are fixed:
+Three of the defects are fixed:
 
 - **TLS trust.** Every connector now verifies certificates against the system's roots plus the public CA bundle, the same trust that run 2 used. With the previous context a request to each script host failed TLS, and with the new one both requests received HTTP responses.
 - **Start pages.** The link stage now scans each start page as the page stage scans other pages, and the page stage skips every URL the link stage requested.
+- **Assignment across properties.** The separator between the field name and the operator no longer admits a comma. The ten resources with candidates in run 2 were fetched once more and matched with both versions of the rule. The assignment matches fell from 13 to 3, and all ten `credentials` matches that crossed a property disappeared. One `credentials` match remains: `withCredentials` is assigned the CORS keyword `use-credentials`, which is not a secret either.
 
-Run 3 used the scanner with both fixes and the default settings. Discovery took 29 s instead of 10 s, because crt.sh answered more slowly, so the table compares the website stages only.
+Run 3 used the scanner with the TLS and start-page fixes and the default settings. Discovery took 29 s instead of 10 s, because crt.sh answered more slowly, so the table compares the website stages only.
 
-| Site B | Run 2 | Run 3: both fixes |
+| Site B | Run 2 | Run 3: TLS and start-page fixes |
 | --- | ---: | ---: |
 | Link stage: elapsed / worker CPU | 18.1 s / 3.3 s | 20.5 s / 7.8 s |
 | Link stage: connect timeouts / longest event-loop block | 76 / 0.06 s | 77 / 0.26 s |

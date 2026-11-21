@@ -78,7 +78,8 @@ class ScanerCredentials:
         )
 
         assignment = (
-            r")[a-z0-9_ .\-,]{0,25}" +  # Key names and separators
+            # Rest of the key name and separators. No comma: it would run into the next property's value.
+            r")[a-z0-9_ .\-]{0,25}" +
             r"(?:=|>|:=|\|\|:|<=|=>|:|->|\+=|\-=|\*=|\/=|%=|\^=|&=|\|=|==|\+=|<<=|>>=|=>|\?=|\?\?=)" +  # Operators
             r"\s*" +  # Optional whitespace
             r"(?P<quote>['\"])" +
