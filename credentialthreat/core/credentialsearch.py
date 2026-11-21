@@ -5,14 +5,21 @@ import asyncio
 import logging
 from typing import Union
 from collections import Counter
+from urllib.parse import urljoin, urlsplit
 import aiohttp
 from aiolimiter import AsyncLimiter
-from credentialthreat.core.fetch import HostPacer, fetch_text, get_header
+from credentialthreat.core.fetch import HostPacer, Page, fetch_text, get_header
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
-from credentialthreat.core.website import PublicDestinationConnector, report_origin
+from credentialthreat.core.website import (PublicDestinationConnector, canonical_url, is_binary_url, module_imports,
+                                           report_origin, url_in_scope)
 
 
 logger = logging.getLogger(__name__)
+
+# Case-insensitive matching folds A-Z and these four letters onto ASCII lower case (dotted and dotless i, long s, Kelvin sign).
+# Each maps to exactly one character, so a folded copy keeps every span of the original text.
+CASE_FOLD = str.maketrans({**{chr(code): chr(code + 32) for code in range(ord("A"), ord("Z") + 1)},
+                           "\u0130": "i", "\u0131": "i", "\u017f": "s", "\u212a": "k"})
 
 
 class ScanerCredentials:
@@ -71,13 +78,20 @@ class ScanerCredentials:
             r"private_key|public_key|ssl_key|ssh_key|gpg_key|certificate"
         )
 
-        # Construct the full pattern
-        self.credential_pattern = (
-            r"(?P<label>" + base_pattern + r")[a-z0-9_ .\-,]{0,25}" +  # Key names and separators
+        assignment = (
+            r")[a-z0-9_ .\-,]{0,25}" +  # Key names and separators
             r"(?:=|>|:=|\|\|:|<=|=>|:|->|\+=|\-=|\*=|\/=|%=|\^=|&=|\|=|==|\+=|<<=|>>=|=>|\?=|\?\?=)" +  # Operators
             r"\s*" +  # Optional whitespace
-            r"(?P<quote>['\"])(?P<value>[0-9a-zA-Z\-_=+/]{8,128})(?P=quote)"
+            r"(?P<quote>['\"])" +
+            r"(?!same-origin(?P=quote))" +  # Fetch API option credentials: "same-origin", not a secret
+            r"(?P<value>[0-9a-zA-Z\-_=+/]{8,128})(?P=quote)"
         )
+        # The rule as written, matched case-insensitively (tests/measure_rules.py reads it).
+        self.credential_pattern = r"(?P<label>" + base_pattern + assignment
+        # The same rule for _findings: lower-case field names, matched against a CASE_FOLD copy of the text.
+        # With IGNORECASE, re tries every field name at every position (about 1.5 s per MB of script, which
+        # blocks the worker's event loop); case-sensitive, it skips positions by their first letter.
+        self._assignment = re.compile(r"(?P<label>" + base_pattern.lower() + assignment, re.MULTILINE)
 
         # Add additional specific patterns for special cases
         self.additional_patterns = {
@@ -95,11 +109,24 @@ class ScanerCredentials:
         self.cancellation_manager = AsyncCancellationManager()
         self.scope = tuple(scope)
         self.outcomes: Counter = Counter()
+        self.imports: set[tuple[str, str]] = set()  # (origin page, module URL) imported by the scripts read here
+
+    def _collect_imports(self, origin_url: str, page: Page) -> None:
+        """Remember the in-scope modules a script that loaded imports; the CLI fetches them in a later round."""
+        content_type = page.content_type
+        is_script = "javascript" in content_type or "ecmascript" in content_type or (
+            not content_type and urlsplit(page.url).path.endswith((".js", ".mjs")))
+        if not is_script or not 200 <= page.status < 300:
+            return
+        for specifier in module_imports(page.text):
+            url = canonical_url(urljoin(page.url, specifier))
+            if url and url_in_scope(url, self.scope) and not is_binary_url(url):
+                self.imports.add((origin_url, url))
 
     def _findings(self, data: str) -> list[tuple[str, str]]:
         labels_by_span: dict[tuple[int, int], list[str]] = {}
-        for match in re.finditer(self.credential_pattern, data, flags=re.IGNORECASE | re.MULTILINE):
-            labels_by_span[match.span("value")] = [match["label"].lower()]
+        for match in self._assignment.finditer(data.translate(CASE_FOLD)):
+            labels_by_span[match.span("value")] = [data[slice(*match.span("label"))].lower()]
         for pattern_name, pattern in self.additional_patterns.items():
             for match in re.finditer(pattern, data):
                 labels = labels_by_span.setdefault(match.span(), [])
@@ -109,10 +136,12 @@ class ScanerCredentials:
 
     async def _get_request(self, url_tuple: tuple[str, str], header, session: aiohttp.ClientSession) -> Union[None, tuple[str, str, list[tuple]]]:
         origin_url, script_url = url_tuple
+        # Resources come from pages that loaded, so a connect timeout is more likely a blocked event loop.
         page = await fetch_text(session, script_url, header, scope=self.scope, limiter=self.rate_limiter,
-                                pacer=self.pacer, outcomes=self.outcomes)
+                                pacer=self.pacer, outcomes=self.outcomes, connect_retries=1)
         if page is None or not page.text:
             return None
+        self._collect_imports(origin_url, page)
         if findings := self._findings(page.text):
             return report_origin(origin_url), report_origin(page.url), findings
         return None
@@ -144,8 +173,8 @@ class ScanerCredentials:
 
         return all_results
 
-    async def get_results(self, network_files: list[tuple[str, str]]) -> tuple[list[tuple], dict[str, int]]:
-        """Redacted candidates per resource and the request outcome counts."""
+    async def get_results(self, network_files: list[tuple[str, str]]) -> tuple[list[tuple], dict[str, int], list[tuple[str, str]]]:
+        """Redacted candidates per resource, the request outcome counts, and the modules the scripts import."""
         logging.basicConfig(level=logging.INFO, format='%(message)s')
         results = await self.process_credentials(network_files=network_files)
-        return results, dict(self.outcomes)
+        return results, dict(self.outcomes), sorted(self.imports)

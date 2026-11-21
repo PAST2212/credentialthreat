@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
+from credentialthreat.core.discovery import QueryResult, log_query_summary
 from credentialthreat.core.subdomainsearch import SubdomainScanner
 from credentialthreat.recon.crtsh import ScanerCrtsh
 from credentialthreat.recon.rapiddns import ScanerRapidDns
@@ -149,6 +150,25 @@ class ProviderResultsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(combined), 6)
         self.assertEqual([q.values for q in combined if q.state == "hits"], [{CHILD}])
         self.assertEqual(sum(q.state == "error" for q in combined), 4)
+
+    async def test_rapiddns_reports_how_many_records_it_holds(self):
+        # Without an account RapidDNS shows 100 rows and states the full total above the table.
+        total = '<div style="margin: 0 8px;">Total: <span style="color: #39cfca; ">5</span></div>'
+        partial = await self.query("RapidDNS", total + HITS["RapidDNS"])
+        self.assertEqual((partial.state, partial.records, partial.available), ("hits", 1, 5))
+        complete = await self.query("RapidDNS", total.replace(">5<", ">1<") + HITS["RapidDNS"])
+        self.assertEqual((complete.records, complete.available), (1, 1))
+        unstated = await self.query("RapidDNS", HITS["RapidDNS"])
+        self.assertIsNone(unstated.available)
+
+    def test_partial_results_are_a_warning_but_not_a_failed_query(self):
+        results = [QueryResult("RapidDNS", HOST, 100, frozenset([CHILD]), available=10891),
+                   QueryResult("RapidDNS", "other.example", 3, frozenset(["a.other.example"]), available=3)]
+        with self.assertLogs(level="INFO") as logs:
+            self.assertFalse(log_query_summary(results))
+        self.assertEqual([(record.getMessage(), record.levelname) for record in logs.records], [
+            ("RapidDNS: hits=2 empty=0 filtered=0 errors=0, partial=1 (100 of 10891 records)", "WARNING")])
+        self.assertNotIn(HOST, " ".join(logs.output))
 
     async def test_cancellation_propagates(self):
         for name in TYPES:

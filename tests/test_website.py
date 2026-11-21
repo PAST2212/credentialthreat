@@ -1,6 +1,29 @@
 import unittest
 
-from credentialthreat.core.website import canonical_url, is_binary_url
+from credentialthreat.core.website import canonical_url, is_binary_url, module_imports
+
+
+class ModuleImportTests(unittest.TestCase):
+    def test_module_specifiers_a_browser_can_load_are_found_in_minified_scripts(self):
+        script = (
+            'import*as T from"https://static.example.com/exports/onex.js";'
+            'import{a as e}from"./preload-helper.js";import"../side-effect.js";'
+            "export*from'/shared/index.js';const m=import( \"./lazy.js\" );"
+        )
+        self.assertEqual(module_imports(script), [
+            "https://static.example.com/exports/onex.js", "./preload-helper.js", "../side-effect.js",
+            "/shared/index.js", "./lazy.js",
+        ])
+
+    def test_text_that_is_not_a_loadable_module_import_is_ignored(self):
+        script = (
+            'import x from "react";'                 # bare specifier: needs an import map
+            'import(`./${name}.js`);'               # computed at runtime
+            'Array.from("abcdefgh");'               # not an import
+            'const s="copied from"+"/x";'           # "from" inside a string
+            'const o={import:"./not-a-module.js"};'
+        )
+        self.assertEqual(module_imports(script), [])
 
 
 class CanonicalUrlTests(unittest.TestCase):

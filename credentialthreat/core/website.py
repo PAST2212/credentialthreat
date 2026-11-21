@@ -99,6 +99,16 @@ def is_binary_url(value: str) -> bool:
     return "." in name and name.rsplit(".", 1)[-1].lower() in BINARY_EXTENSIONS
 
 
+# Static (`import ... from`, `export ... from`, `import "x"`) and dynamic (`import("x")`) ES module imports whose
+# specifier a browser loads without an import map: relative to the script (./, ../, /) or an absolute http(s) URL.
+MODULE_IMPORT = re.compile(r"""(?:\b(?:from|import)\s*|\bimport\s*\(\s*)(["'])((?:\.{0,2}/|https?://)[^"'\s]+)\1""")
+
+
+def module_imports(script: str) -> list[str]:
+    """Literal module specifiers a browser would fetch for this script, in order of appearance."""
+    return [match.group(2) for match in MODULE_IMPORT.finditer(script)]
+
+
 def report_origin(value: str) -> str:
     """Exclude userinfo, paths, query strings and fragments from findings."""
     try:

@@ -18,7 +18,8 @@ from bs4 import XMLParsedAsHTMLWarning
 from credentialthreat.core.credentialsearch import ScanerCredentials
 from credentialthreat.core.fetch import HostPacer, fetch_text, get_header
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
-from credentialthreat.core.website import PublicDestinationConnector, canonical_url, is_binary_url, report_origin, url_in_scope
+from credentialthreat.core.website import (PublicDestinationConnector, canonical_url, is_binary_url, module_imports,
+                                           report_origin, url_in_scope)
 
 
 logger = logging.getLogger(__name__)
@@ -49,8 +50,9 @@ class ScanerNetworkResources:
 
     async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, tuple[str, str, BeautifulSoup]]:
         """Final page URL, page text and parsed markup, or None when the page could not be read."""
+        # Hosts here answered before, so a connect timeout is more likely a blocked event loop than a dead host.
         page = await fetch_text(session, url, header, scope=self.scope, limiter=self.rate_limiter,
-                                pacer=self.pacer, outcomes=self.outcomes)
+                                pacer=self.pacer, outcomes=self.outcomes, connect_retries=1)
         if page is None:
             return None
         markup = page.text
@@ -127,18 +129,15 @@ class ScanerNetworkResources:
 
                 for script in soup.find_all("script", src=None):  # inline scripts
                     if script_text := script.string:
-                        # Look for dynamic imports
-                        import_patterns = [
-                            r'import\s+[\'"]([^\'"]+)[\'"]',
-                            r'require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
-                            r'importScripts\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
-                            r'loadScript\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)'
-                        ]
-                        for pattern in import_patterns:
-                            if matches := re.finditer(pattern, script_text):
-                                for match in matches:
-                                    if imported_url := self._resolve(url, match.group(1), domains_input):
-                                        results.append(ScrapNetworkUrls(url, imported_url))
+                        # ES module imports, then the script loaders whose argument is a plain URL
+                        references = module_imports(script_text)
+                        for pattern in (r'require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
+                                        r'importScripts\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
+                                        r'loadScript\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)'):
+                            references.extend(match.group(1) for match in re.finditer(pattern, script_text))
+                        for reference in references:
+                            if imported_url := self._resolve(url, reference, domains_input):
+                                results.append(ScrapNetworkUrls(url, imported_url))
 
         except Exception:
             self.pages.add(url)

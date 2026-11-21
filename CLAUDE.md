@@ -23,14 +23,14 @@ Always go through `discover -s tests`. `test_rule_benchmark.py` imports `credent
 
 1. **Discovery** (`core/subdomainsearch.py`) runs in the parent process. It queries crt.sh and RapidDNS for every configured domain and keeps only in-scope hosts.
 2. **Internal links** (`core/internallinksearch.py`) fetches each host's home page and collects its `<a href>` links.
-3. **Network resources** (`core/networksearch.py`) fetches each page once. It collects script, link, iframe and other resource URLs, plus inline `import`/`require` targets, and matches the credential rules (`ScanerCredentials._findings`) against the page text. Its worker returns `(resources, requested pages, redacted page candidates, outcomes)`.
-4. **Credentials** (`core/credentialsearch.py`) fetches each remaining resource and matches the credential rules against the response text. The CLI drops every URL that stage 3 requested, so a page is never fetched twice, and merges both candidate lists before writing the report.
+3. **Network resources** (`core/networksearch.py`) fetches each page once. It collects script, link, iframe and other resource URLs, plus the targets of inline module imports (`website.module_imports`) and of `require`, `importScripts` and `loadScript`. It also matches the credential rules (`ScanerCredentials._findings`) against the page text. Its worker returns `(resources, requested pages, redacted page candidates, outcomes)`.
+4. **Credentials** (`core/credentialsearch.py`) fetches each remaining resource and matches the credential rules against the response text. The CLI drops every URL that stage 3 requested, so a page is never fetched twice, and merges both candidate lists before writing the report. Its worker returns `(candidates, outcomes, imports)`. `imports` lists the in-scope modules that 2xx JavaScript responses import. The CLI fetches new ones in further rounds on the same pool, at most `IMPORT_ROUNDS` (5). `_next_imports` drops every URL already requested and counts the rest against `--limit`.
 
 Stages 2–4 share one pattern:
 
 - The parent deals the work round-robin into one chunk per worker with `utils.plan_chunks` and runs the chunks on a `multiprocessing` pool from `interrupt_handler.create_pool`. A chunk ends with its slowest request, so more chunks per worker would add idle tails. A real scan showed this: with four chunks per worker, each worker spent over half its time with only one or two requests in flight.
 - Because every worker works on every host at once, the workers share one per-host connection budget: `utils.host_connections_per_worker` hands each worker an equal share of 25, at least two. Workers pass it to the scanners' `host_connections`. Against one real host, five workers without the budget lost 80 resources to connect timeouts. With it, they lost 12.
-- Each chunk goes to a module-level `process_chunks_for_*` function, which calls `asyncio.run` on a scanner class constructed with `scope=domains`. Workers return their results plus a dict of request outcomes. The parent sums the outcomes and logs one `... requests: ok=N, skipped=M (...)` line per stage.
+- Each chunk goes to a module-level `process_chunks_for_*` function, which calls `asyncio.run` on a scanner class constructed with `scope=domains`. Workers return their results plus a dict of request outcomes. The parent sums the outcomes and logs one `... requests: ok=N, error status=E (...), skipped=M (...)` line per stage. The `error status` part appears only when error pages were read.
 - Inside a worker, `AsyncCancellationManager.run_window` keeps `window_size` requests in flight (a sliding window, not batches), so one slow response never holds back the others.
 - The parent reads results through `GracefulKiller.pool_results`, which converts SIGINT/SIGTERM into `ScanInterrupted`.
 - `UrlPrioritizer` in `core/utils.py` caps each stage's input at `--limit` and takes high-priority URL patterns first. Pages and the other resources are capped separately; pages never count against the resource cap.
@@ -48,9 +48,12 @@ The workers have to survive multiprocessing:
 Every website request goes through `fetch_text` in `core/fetch.py`.
 
 - It follows redirects only to targets inside the scope, for up to three hops. Without a scope it follows none.
-- It retries 429 and 503 responses (honouring `Retry-After`, capped at 30 s), read timeouts and dropped connections. It does not retry connect timeouts or other connection errors.
+- It retries 429 and 503 responses (honouring `Retry-After`, capped at 30 s), read timeouts and dropped connections. It does not retry other connection errors. It retries connect timeouts only up to `connect_retries`. The page and resource scanners pass 1 and the link scanner passes 0. CPU-bound work can block a worker's event loop past `sock_connect` (5 s). The expired timer then fires before the finished connection is processed, so a connection that succeeded becomes a connect timeout. `BlockedLoopTests` reproduces this. In the link stage most connect timeouts are dead hosts.
+- `connection_failure` names the cause of a request that never got a response: `DNS`, `destination blocked`, `TLS` or `connection`. These names match the discovery reasons.
 - Each scanner owns a `HostPacer`, which hands out the worker's per-host request slots (`connections`). Requests beyond the share wait in `pacer.slot` before reaching aiohttp, because aiohttp counts time spent waiting for a pooled connection against the 45 s total timeout. The pacer also paces requests per host. A 429 or 503 pauses the host and halves its rate, and other responses raise it again. Without it, the parallel workers multiplied the load on throttling servers and lost more pages than the old single-worker stage did. Tests inject a `FakeClock` (in `tests/http_doubles.py`) into `scanner.pacer`. Patching only `asyncio.sleep` leaves the pacer on the real clock.
 - It skips binary content types without reading the body and cuts bodies at 10 MB.
+- It skips a bot-management challenge without reading or retrying it and counts it as `bot challenge`. `is_bot_challenge` recognizes a non-2xx response with Kasada's `x-kpsdk-ct` header or Cloudflare's `cf-mitigated: challenge`. Each challenge page loads its script under a fresh URL. On one production site, following them made up 55 % of the resource requests.
+- Bodies of other error responses are still returned for scanning, because debug pages can leak values. They count as `HTTP <status> read`, never as `ok`.
 - Every call adds exactly one entry to the scanner's `outcomes` counter.
 
 Scanners must not open requests any other way.
@@ -76,6 +79,8 @@ Exit codes are:
 
 A website-discovery provider subclasses `SubdomainProvider` in `core/discovery.py` and implements `_scrape_subdomains(session, domain) -> (record_count, hosts)`. Register it in `SUBDOMAIN_SERVICES` in `core/subdomainsearch.py`.
 
+A provider that states its total can return `(record_count, hosts, stated_total)`. RapidDNS does this, because without an account it lists only 100 records. `QueryResult.available` holds the total. When it exceeds `records`, `log_query_summary` adds a `partial=N (...)` warning. A partial answer does not count as a failed query, so the exit code stays the same.
+
 - Raise `UnexpectedFormat` for a response the provider does not recognize, even with HTTP 200. Do not return an empty set for it.
 - Call `require_ok` for HTTP status checks.
 - `observe` turns each query into a `QueryResult` in one of four states: `hits`, `empty` (a confirmed zero), `filtered` or `error`. The summary log and the exit code depend on those states.
@@ -87,10 +92,10 @@ A website-discovery provider subclasses `SubdomainProvider` in `core/discovery.p
 
 Rules live in `ScanerCredentials.__init__`:
 
-- `credential_pattern` matches a field name, an assignment operator and a quoted value.
+- `credential_pattern` matches a field name, an assignment operator and a quoted value, case-insensitively. `tests/measure_rules.py` reads this string. The value `same-origin` is excluded: it is the Fetch API option `credentials: "same-origin"`, and on one production site it accounted for every match.
 - `additional_patterns` holds the format-specific rules: `jwt`, `private_key` and `aws_keys`.
 
-`ScanerCredentials._findings` applies them. The page stage reuses it through `ScanerNetworkResources.matcher`, so a rule change affects pages and resources alike. Matches at the same span are merged into a single label such as `api_key + aws_keys`. The worker replaces each value with `[REDACTED]` before returning it.
+`ScanerCredentials._findings` applies them. It does not run `credential_pattern` with `IGNORECASE`: with that flag `re` tries every field name at every position, about 1.5 s per MB of script, and the worker's event loop stalls meanwhile. Instead it runs `_assignment`, the same rule built from the same parts with lower-case field names, against a `CASE_FOLD` copy of the text. That copy has the same length, so spans and results stay identical. `test_benchmark_hits_agree_with_redacted_worker_on_every_page` and `MatcherTests` check this, so build any change to the rule from the shared parts. The page stage reuses it through `ScanerNetworkResources.matcher`, so a rule change affects pages and resources alike. Matches at the same span are merged into a single label such as `api_key + aws_keys`. The worker replaces each value with `[REDACTED]` before returning it.
 
 `tests/measure_rules.py` refuses to run when `RULES` in `tests/credential_corpus.py` differs from the scanner's rule set. Adding or renaming a rule therefore needs a matching corpus update. If the benchmark numbers change, update `reports/website-scan-review/README.md`.
 

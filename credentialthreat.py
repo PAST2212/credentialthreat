@@ -92,13 +92,31 @@ def main():
 
 
 def _log_outcomes(stage: str, outcomes: Counter) -> None:
-    """One line per stage: URLs read, and why the others were skipped (WARNING if any were)."""
+    """One line per stage: URLs read, error pages read, and why the others were skipped (WARNING unless all were ok)."""
     read = outcomes["ok"] + outcomes["truncated"]
-    skipped = {key: count for key, count in outcomes.items() if key not in ("ok", "truncated") and count}
+    errors = {key.removesuffix(" read"): count for key, count in outcomes.items() if key.endswith(" read") and count}
+    skipped = {key: count for key, count in outcomes.items()
+               if key not in ("ok", "truncated") and not key.endswith(" read") and count}
+    error_detail = ", ".join(f"{key}={count}" for key, count in sorted(errors.items()))
     detail = ", ".join(f"{key}={count}" for key, count in sorted(skipped.items()))
-    logging.log(logging.WARNING if skipped else logging.INFO, "%s requests: ok=%d%s, skipped=%d%s",
+    logging.log(logging.WARNING if skipped or errors else logging.INFO, "%s requests: ok=%d%s%s, skipped=%d%s",
                 stage, read, f" (truncated={outcomes['truncated']})" if outcomes["truncated"] else "",
+                f", error status={sum(errors.values())} ({error_detail})" if errors else "",
                 sum(skipped.values()), f" ({detail})" if detail else "")
+
+
+IMPORT_ROUNDS = 5  # rounds of imported modules after the first credential round
+
+
+def _next_imports(imported, requested: set, domains, budget: int) -> tuple[list[tuple[str, str]], int]:
+    """In-scope modules not requested yet, sorted and capped at `budget`, and how many the cap left out."""
+    new = {}
+    for origin, url in imported:
+        if url not in requested and url not in new and url_in_scope(origin, domains) and url_in_scope(url, domains):
+            new[url] = origin
+    selected = [(origin, url) for url, origin in sorted(new.items())]
+    budget = max(0, budget)
+    return selected[:budget], len(selected[budget:])
 
 
 def _write_scan_report(leaks, status):
@@ -252,27 +270,45 @@ def _run_scan(killer):
 
         if not network_files_scaled:
             return _write_scan_report(leaks, status)
-        process_chunks = [(chunk, domains, host_connections) for chunk in utils.plan_chunks(network_files_scaled, num_processes)]
-        total_chunks = len(process_chunks)
 
         worker = partial(process_chunks_for_credentialsearch)
 
         resource_outcomes: Counter = Counter()
-        completed_chunks = 0
+        # Modules that scripts import are fetched in further rounds on the same pool. They count against
+        # --limit like every other resource, and no URL is requested twice.
+        requested = set(scanned_pages) | {resource for _, resource in network_files_scaled}
+        budget = url_limit - len(network_files_scaled)
+        pending = network_files_scaled
+        rounds = 0
 
         start2 = time.perf_counter()
         logging.info(FY + f"\nStarting Credential Scan:"
                           f"\n├── Total URLs: {len(network_files_scaled):,}"
-                          f"\n├── Total Chunks: {total_chunks}"
+                          f"\n├── Total Chunks: {len(utils.plan_chunks(network_files_scaled, num_processes))}"
                           f"\n└── CPU Cores: {num_processes}\n" + S)
         try:
             with killer.defer_pool_signals(), create_pool(processes=num_processes) as pool:
-                for chunk_result in killer.pool_results(pool, worker, process_chunks):
-                    found_leaks, outcomes = chunk_result
-                    leaks.extend(found_leaks)
-                    resource_outcomes.update(outcomes)
-                    completed_chunks += 1
-                    logging.info(FG + f"Chunk {completed_chunks}/{total_chunks} completed: {len(found_leaks)} resources with candidates\n" + S)
+                while pending:
+                    rounds += 1
+                    process_chunks = [(chunk, domains, host_connections) for chunk in utils.plan_chunks(pending, num_processes)]
+                    imported = []
+                    for completed_chunks, chunk_result in enumerate(killer.pool_results(pool, worker, process_chunks), 1):
+                        found_leaks, outcomes, imports = chunk_result
+                        leaks.extend(found_leaks)
+                        resource_outcomes.update(outcomes)
+                        imported.extend(imports)
+                        logging.info(FG + f"Chunk {completed_chunks}/{len(process_chunks)} completed: {len(found_leaks)} resources with candidates\n" + S)
+                    pending, over_limit = _next_imports(imported, requested, domains, budget)
+                    if pending and rounds > IMPORT_ROUNDS:
+                        logging.warning("%d imported modules not followed: imports nested deeper than %d rounds",
+                                        len(pending), IMPORT_ROUNDS)
+                        break
+                    if over_limit:
+                        logging.warning("%d imported modules skipped by the URL limit", over_limit)
+                    budget -= len(pending)
+                    requested.update(resource for _, resource in pending)
+                    if pending:
+                        logging.info(FY + f"\nFollowing imported modules, round {rounds + 1}: {len(pending):,} URLs\n" + S)
 
         except KeyboardInterrupt:
             logging.info("\nCredential scan cancelled by user")

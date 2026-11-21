@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
 
+import re
+
 import aiohttp
 from bs4 import BeautifulSoup
 from credentialthreat.core.discovery import SubdomainProvider, UnexpectedFormat, require_ok
 from credentialthreat.core.website import host_in_scope
+
+TOTAL_LABEL = re.compile(r"^\s*Total:\s*$")
+
+
+def _stated_total(soup: BeautifulSoup) -> int | None:
+    """The record count RapidDNS states above its table. Without an account the table lists only 100 of them."""
+    label = soup.find(string=TOTAL_LABEL)
+    count = label.find_next("span") if label else None
+    text = count.get_text(strip=True).replace(",", "") if count else ""
+    return int(text) if text.isdigit() else None
 
 
 class ScanerRapidDns(SubdomainProvider):
@@ -11,7 +23,7 @@ class ScanerRapidDns(SubdomainProvider):
     retry_pause = 5.0  # published limit: 30 requests per minute
 
     @staticmethod
-    async def _scrape_subdomains(session: aiohttp.ClientSession, domain: str) -> tuple[int, set[str]]:
+    async def _scrape_subdomains(session: aiohttp.ClientSession, domain: str) -> tuple[int, set[str], int | None]:
         url = f"https://rapiddns.io/s/{domain}?full=1#result"
         async with session.get(url) as response:
             require_ok(response.status)
@@ -34,4 +46,4 @@ class ScanerRapidDns(SubdomainProvider):
                 raise UnexpectedFormat
             if host_in_scope(host, [domain]):
                 names.add(host)
-        return len(rows) - 1, names
+        return len(rows) - 1, names, _stated_total(soup)

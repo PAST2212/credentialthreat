@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
-from credentialthreat.core.website import canonical_url, url_in_scope
+from credentialthreat.core.website import DestinationBlocked, canonical_url, url_in_scope
 
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,26 @@ class HostPacer:
             self.rates[host] = min(self.start, rate + self.start / 32)
 
 
+def is_bot_challenge(status: int, headers) -> bool:
+    """True for an error response that a bot-management service marks as a challenge instead of content.
+
+    Kasada sends its challenge with an ``x-kpsdk-ct`` token, Cloudflare with ``cf-mitigated: challenge``.
+    A challenge page only loads the service's script, which is fetched anew under a unique URL every time.
+    """
+    if 200 <= status < 300:
+        return False
+    return "x-kpsdk-ct" in headers or (headers.get("cf-mitigated") or "").strip().lower() == "challenge"
+
+
+def connection_failure(exc: Exception) -> str:
+    """Outcome name for a request that never got a response, by cause (no exception text)."""
+    if isinstance(exc, aiohttp.ClientConnectorDNSError):
+        return "destination blocked" if isinstance(exc.os_error, DestinationBlocked) else "DNS"
+    if isinstance(exc, aiohttp.ClientSSLError):  # includes certificate errors
+        return "TLS"
+    return "connection"
+
+
 @dataclass(frozen=True)
 class Page:
     url: str  # final URL after in-scope redirects
@@ -132,16 +152,19 @@ async def _read_text(response, max_bytes: int) -> tuple[str, bool]:
 
 
 async def fetch_text(session, url: str, headers: dict, *, scope=(), limiter=None, pacer: HostPacer | None = None,
-                     outcomes: Counter | None = None, sleep=None, max_bytes: int = MAX_BODY_BYTES) -> Page | None:
+                     outcomes: Counter | None = None, sleep=None, max_bytes: int = MAX_BODY_BYTES,
+                     connect_retries: int = 0) -> Page | None:
     """GET a text resource without automatic redirects.
 
     Redirects are followed only to URLs inside ``scope`` (at most MAX_REDIRECTS hops); every hop
-    goes through the same connector checks. 429/503 and read timeouts are retried. Binary content
-    types are not downloaded and bodies are cut at ``max_bytes``. Each call adds exactly one entry
-    to ``outcomes``.
+    goes through the same connector checks. 429/503 and read timeouts are retried, connect timeouts
+    up to ``connect_retries`` times. Bot challenges and binary content types are not downloaded, and
+    bodies are cut at ``max_bytes``. Error-status bodies are returned for scanning but counted as
+    ``HTTP <status> read``, not ``ok``. Each call adds exactly one entry to ``outcomes``.
     """
     outcomes = outcomes if outcomes is not None else Counter()
     sleep = sleep or asyncio.sleep
+    connect_timeouts = 0
     for _hop in range(MAX_REDIRECTS + 1):
         attempt = 0
         while True:
@@ -156,6 +179,10 @@ async def fetch_text(session, url: str, headers: dict, *, scope=(), limiter=None
                             pass
                     async with session.get(url, headers=headers, allow_redirects=False) as response:
                         status = response.status
+                        if is_bot_challenge(status, response.headers):
+                            # The challenge holds no site content, and repeating the request does not pass it.
+                            outcomes["bot challenge"] += 1
+                            return None
                         if status in RETRY_STATUSES:
                             delay = retry_delay(response.headers, attempt)
                             if pacer is not None:
@@ -179,19 +206,25 @@ async def fetch_text(session, url: str, headers: dict, *, scope=(), limiter=None
                                 outcomes["binary"] += 1
                                 return None
                             text, truncated = await _read_text(response, max_bytes)
-                            outcomes["truncated" if truncated else "ok"] += 1
+                            if 200 <= status < 300:
+                                outcomes["truncated" if truncated else "ok"] += 1
+                            else:
+                                outcomes[f"HTTP {status} read"] += 1
                             return Page(url, status, text, content_type.lower())
             except aiohttp.ConnectionTimeoutError:
-                # The host did not accept a connection; repeating rarely helps.
-                outcomes["connect timeout"] += 1
-                return None
+                # A host that did not accept a connection rarely does on a second try. But when CPU-bound
+                # work blocks the event loop past sock_connect, a connection that succeeded ends the same way.
+                connect_timeouts += 1
+                if connect_timeouts > connect_retries:
+                    outcomes["connect timeout"] += 1
+                    return None
             except (asyncio.TimeoutError, aiohttp.ServerDisconnectedError, aiohttp.ClientPayloadError) as exc:
                 if attempt >= MAX_ATTEMPTS:
                     outcomes["timeout" if isinstance(exc, asyncio.TimeoutError) else "connection"] += 1
                     return None
                 wait = 2.0 ** attempt
-            except (aiohttp.ClientConnectionError, aiohttp.InvalidURL):
-                outcomes["connection"] += 1
+            except (aiohttp.ClientConnectionError, aiohttp.InvalidURL) as exc:
+                outcomes[connection_failure(exc)] += 1
                 return None
             except Exception as exc:
                 logger.error("Website request failed (%s)", type(exc).__name__)

@@ -21,6 +21,7 @@ class QueryResult:
     records: int | None
     values: frozenset[str] = field(default_factory=frozenset, repr=False)
     reason: str | None = None
+    available: int | None = None  # records the provider states it holds; above `records`, the answer is partial
 
     @property
     def state(self) -> str:
@@ -64,10 +65,11 @@ def error_reason(provider: str, exc: Exception) -> str:
     return type(exc).__name__
 
 
-async def observe(provider: str, domain: str, query: Awaitable[tuple[int, set[str]]]) -> QueryResult:
+async def observe(provider: str, domain: str, query: Awaitable[tuple]) -> QueryResult:
+    """Run one provider query: (records, hosts) or (records, hosts, records the provider states it holds)."""
     try:
-        records, values = await query
-        return QueryResult(provider, domain, records, frozenset(values))
+        records, values, *available = await query
+        return QueryResult(provider, domain, records, frozenset(values), available=available[0] if available else None)
     except Exception as exc:
         return QueryResult(provider, domain, None, reason=error_reason(provider, exc))
 
@@ -102,17 +104,27 @@ class SubdomainProvider:
 
 
 def log_query_summary(results: list[QueryResult]) -> bool:
-    """Log per-provider query counts and return whether any query failed."""
+    """Log per-provider query counts and return whether any query failed.
+
+    A partial answer (the provider states more records than it returned) is a warning, not a failure:
+    it is how some providers answer without an account, so it would otherwise fail every large scan.
+    """
     counts = {}
     reasons = {}
+    partial = {}
     for result in results:
         counts.setdefault(result.provider, Counter())[result.state] += 1
         if result.reason is not None:
             reasons.setdefault(result.provider, Counter())[result.reason] += 1
+        if result.available is not None and result.records is not None and result.available > result.records:
+            queries, returned, stated = partial.get(result.provider, (0, 0, 0))
+            partial[result.provider] = (queries + 1, returned + result.records, stated + result.available)
     for provider, count in counts.items():
         detail = ", ".join(f"{reason}={n}" for reason, n in sorted(reasons.get(provider, {}).items()))
-        logging.log(logging.WARNING if count["error"] else logging.INFO,
-                    "%s: hits=%d empty=%d filtered=%d errors=%d%s", provider,
+        part = partial.get(provider)
+        logging.log(logging.WARNING if count["error"] or part else logging.INFO,
+                    "%s: hits=%d empty=%d filtered=%d errors=%d%s%s", provider,
                     count["hits"], count["empty"], count["filtered"], count["error"],
-                    f" ({detail})" if detail else "")
+                    f" ({detail})" if detail else "",
+                    f", partial={part[0]} ({part[1]} of {part[2]} records)" if part else "")
     return bool(reasons)

@@ -1,11 +1,16 @@
 import asyncio
 from collections import Counter
+import socket
+import ssl
+import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import aiohttp
+from aiohttp import web
 
 from credentialthreat.core.fetch import HostPacer, fetch_text
+from credentialthreat.core.website import DestinationBlocked
 from http_doubles import FakeClock, response, session_returning
 
 
@@ -117,6 +122,35 @@ class FetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.fetch(session)).text, "ok")
         self.assertEqual(session.get.call_count, 2)
 
+    async def test_connect_timeout_is_retried_when_the_caller_allows_it(self):
+        session = session_returning(aiohttp.ConnectionTimeoutError(), response(200, "ok"))
+        page = await self.fetch(session, connect_retries=1)
+        self.assertEqual(page.text, "ok")
+        self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(self.outcomes, Counter({"ok": 1}))
+
+    async def test_connect_timeout_retries_are_bounded(self):
+        session = session_returning(aiohttp.ConnectionTimeoutError(), aiohttp.ConnectionTimeoutError())
+        self.assertIsNone(await self.fetch(session, connect_retries=1))
+        self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(self.outcomes, Counter({"connect timeout": 1}))
+
+    async def test_connection_failures_are_counted_by_cause(self):
+        key = Mock()
+        failures = (
+            (aiohttp.ClientConnectorDNSError(key, socket.gaierror(11001, "getaddrinfo failed")), "DNS"),
+            (aiohttp.ClientConnectorDNSError(key, DestinationBlocked("private")), "destination blocked"),
+            (aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("self-signed")), "TLS"),
+            (aiohttp.ClientConnectorSSLError(key, ssl.SSLError("handshake")), "TLS"),
+            (aiohttp.ClientConnectorError(key, ConnectionRefusedError("refused")), "connection"),
+        )
+        for error, cause in failures:
+            with self.subTest(error=type(error).__name__, cause=cause):
+                session = session_returning(error)
+                self.assertIsNone(await self.fetch(session))
+                self.assertEqual(session.get.call_count, 1)
+                self.assertEqual(self.outcomes, Counter({cause: 1}))
+
     async def test_unreachable_host_is_not_retried(self):
         for error in (aiohttp.ConnectionTimeoutError(), aiohttp.ClientConnectorError(Mock(), OSError("refused"))):
             with self.subTest(error=type(error).__name__):
@@ -182,6 +216,59 @@ class FetchTests(unittest.IsolatedAsyncioTestCase):
     async def test_error_status_bodies_are_still_returned_for_scanning(self):
         page = await self.fetch(session_returning(response(500, "debug trace")))
         self.assertEqual((page.status, page.text), (500, "debug trace"))
+
+    async def test_error_status_bodies_are_counted_apart_from_ok(self):
+        for status in (400, 403, 404, 500):
+            with self.subTest(status=status):
+                await self.fetch(session_returning(response(status, "error page")))
+                self.assertEqual(self.outcomes, Counter({f"HTTP {status} read": 1}))
+
+    async def test_bot_challenge_is_neither_read_nor_retried(self):
+        challenges = (
+            (400, {"x-kpsdk-ct": "token"}),         # Kasada
+            (429, {"x-kpsdk-ct": "token"}),
+            (403, {"cf-mitigated": "challenge"}),   # Cloudflare
+            (503, {"cf-mitigated": "challenge"}),
+        )
+        for status, headers in challenges:
+            with self.subTest(status=status, headers=headers):
+                challenge = response(status, '<script src="/ips.js?KP_UIDz=1"></script>', headers)
+                session = session_returning(challenge)
+                self.assertIsNone(await self.fetch(session))
+                self.assertEqual(session.get.call_count, 1)
+                self.assertEqual(challenge.content.reads, 0)
+                self.sleep.assert_not_awaited()
+                self.assertEqual(self.outcomes, Counter({"bot challenge": 1}))
+
+    async def test_challenge_headers_on_a_normal_page_do_not_skip_it(self):
+        page = await self.fetch(session_returning(response(200, "<html>ok</html>", {"x-kpsdk-ct": "token"})))
+        self.assertEqual(page.text, "<html>ok</html>")
+        self.assertEqual(self.outcomes, Counter({"ok": 1}))
+
+
+class BlockedLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_that_finished_while_the_loop_was_blocked_is_retried(self):
+        # CPU-bound work in the worker's loop (parsing, matching) can outlast sock_connect. The connection
+        # completes in time, but the expired timer runs first, so aiohttp reports a connect timeout.
+        app = web.Application()
+        app.router.add_get("/", lambda request: web.Response(text="ok"))
+        runner = web.AppRunner(app)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        url = "http://127.0.0.1:%d/" % site._server.sockets[0].getsockname()[1]
+        timeout = aiohttp.ClientTimeout(total=10, sock_read=5, sock_connect=0.2)
+        for retries, expected in ((0, Counter({"connect timeout": 1})), (1, Counter({"ok": 1}))):
+            with self.subTest(connect_retries=retries):
+                outcomes = Counter()
+                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True), timeout=timeout) as session:
+                    request = asyncio.ensure_future(fetch_text(session, url, {}, outcomes=outcomes, connect_retries=retries))
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                    time.sleep(0.5)  # the loop is blocked while the connection is made
+                    await request
+                self.assertEqual(outcomes, expected)
 
 
 if __name__ == "__main__":

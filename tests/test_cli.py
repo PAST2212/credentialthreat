@@ -1,3 +1,4 @@
+from collections import Counter
 import contextlib
 import csv
 import io
@@ -191,7 +192,7 @@ class CliTests(unittest.TestCase):
         files_mock = Mock()
         files_mock.return_value.get_domains.return_value = [host]
         pools = Mock(wraps=ThreadPool)
-        matches = Mock(return_value=([], {}))
+        matches = Mock(return_value=([], {}, []))
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(CLI["utils"], "get_workers", return_value=1))
             stack.enter_context(patch.object(CLI["utils"], "configure_platform_settings"))
@@ -227,7 +228,7 @@ class CliTests(unittest.TestCase):
 
         def resource_worker(arg):
             seen_resources.extend(arg[0])
-            return [], {}
+            return [], {}, []
 
         with contextlib.ExitStack() as stack:
             files_mock = Mock()
@@ -246,6 +247,58 @@ class CliTests(unittest.TestCase):
             with self.assertLogs(level="INFO"):
                 self.assertEqual(main(), 0)
         self.assertCountEqual([resource for _, resource in seen_resources], scripts)
+
+    def run_with_imports(self, imports, limit):
+        """Scan one page with one script; the resource worker reports `imports[resource]` for each resource."""
+        main = CLI["main"]
+        utils = CLI["utils"]
+        host = "shop.example.com"
+        page = f"https://{host}/"
+        rounds = []
+        pools = Mock(wraps=ThreadPool)
+
+        def resource_worker(arg):
+            rounds.append(sorted(resource for _, resource in arg[0]))
+            return [], {"ok": len(arg[0])}, [found for _, resource in arg[0] for found in imports.get(resource, [])]
+
+        with contextlib.ExitStack() as stack:
+            files_mock = Mock()
+            files_mock.return_value.get_domains.return_value = [host]
+            stack.enter_context(patch.object(utils, "get_workers", return_value=1))
+            stack.enter_context(patch.object(utils, "configure_platform_settings"))
+            stack.enter_context(patch.dict(main.__globals__, {
+                "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=limit),
+                "ManageFiles": files_mock, "create_pool": pools,
+                "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
+                "process_chunks_for_internallinks": lambda args: ([page], {}),
+                "process_chunks_for_networksearch": lambda args: (
+                    [utils.ScrapNetworkUrls(page, page + "app.js")], {page}, [], {"ok": 1}),
+                "process_chunks_for_credentialsearch": resource_worker,
+            }))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertLogs(level="INFO") as logs:
+                self.assertEqual(main(), 0)
+        return rounds, pools.call_count, "\n".join(logs.output)
+
+    def test_imported_modules_are_scanned_in_later_rounds_of_the_same_pool(self):
+        page = "https://shop.example.com/"
+        imports = {
+            # Out of scope, already requested (the page, the script itself) and repeated imports are dropped.
+            page + "app.js": [(page, page + "m/mod.js"), (page, "https://other.example.net/x.js"),
+                              (page, page + "app.js"), (page, page), (page, page + "m/mod.js")],
+            page + "m/mod.js": [(page, page + "m/lazy.js"), (page, page + "app.js")],
+        }
+        rounds, pools, output = self.run_with_imports(imports, limit=100)
+        self.assertEqual(rounds, [[page + "app.js"], [page + "m/mod.js"], [page + "m/lazy.js"]])
+        self.assertEqual(pools, 3)
+        self.assertIn("Credential scan requests: ok=3, skipped=0", output)
+
+    def test_imported_modules_count_against_the_resource_limit(self):
+        page = "https://shop.example.com/"
+        imports = {page + "app.js": [(page, page + name) for name in ("c.js", "a.js", "b.js")]}
+        rounds, _, output = self.run_with_imports(imports, limit=2)
+        self.assertEqual(rounds, [[page + "app.js"], [page + "a.js"]])
+        self.assertIn("2 imported modules skipped by the URL limit", output)
 
     def test_each_host_and_page_enters_its_stage_once(self):
         main = CLI["main"]
@@ -297,7 +350,7 @@ class CliTests(unittest.TestCase):
 
         def resource_worker(arg):
             resource_chunks.append(list(arg[0]))
-            return [], {}
+            return [], {}, []
 
         with contextlib.ExitStack() as stack:
             files_mock = Mock()
@@ -345,7 +398,7 @@ class CliTests(unittest.TestCase):
                 "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
                 "process_chunks_for_internallinks": remember(([page], {})),
                 "process_chunks_for_networksearch": remember(([utils.ScrapNetworkUrls(page, page + "app.js")], set(), [], {})),
-                "process_chunks_for_credentialsearch": remember(([], {})),
+                "process_chunks_for_credentialsearch": remember(([], {}, [])),
             }))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             with self.assertLogs(level="INFO"):
@@ -371,7 +424,7 @@ class CliTests(unittest.TestCase):
                     [page], {"ok": 1, "redirect skipped": 2, "connect timeout": 3}),
                 "process_chunks_for_networksearch": lambda args: (
                     [utils.ScrapNetworkUrls(page, page + "app.js")], set(), [], {"ok": 1}),
-                "process_chunks_for_credentialsearch": lambda args: ([], {"ok": 4, "HTTP 429": 5}),
+                "process_chunks_for_credentialsearch": lambda args: ([], {"ok": 4, "HTTP 429": 5}, []),
             }))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             with self.assertLogs(level="INFO") as logs:
@@ -382,6 +435,15 @@ class CliTests(unittest.TestCase):
             "Network resource scan requests: ok=1, skipped=0": "INFO",
             "Credential scan requests: ok=4, skipped=5 (HTTP 429=5)": "WARNING",
         })
+
+    def test_error_pages_and_bot_challenges_are_not_reported_as_ok(self):
+        log_outcomes = CLI["_log_outcomes"]
+        with self.assertLogs(level="INFO") as logs:
+            log_outcomes("Network resource scan", Counter({
+                "ok": 5, "truncated": 1, "HTTP 403 read": 2, "HTTP 404 read": 1, "bot challenge": 3}))
+        self.assertEqual([(record.getMessage(), record.levelname) for record in logs.records], [(
+            "Network resource scan requests: ok=6 (truncated=1), error status=3 (HTTP 403=2, HTTP 404=1), "
+            "skipped=3 (bot challenge=3)", "WARNING")])
 
     def test_worker_failure_reaches_the_caller(self):
         worker = CLI["process_chunks_for_networksearch"]

@@ -60,6 +60,26 @@ class PageCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scanner.pages, {page})
         self.assertEqual(dict(scanner.outcomes), {"ok": 1})
 
+    async def test_inline_module_imports_are_collected(self):
+        session = session_returning(response(200, (
+            '<script type="module">import{a}from"./js/m.js";import("/lazy.js");'
+            'import"https://static.example.com/s.js";import x from "react";</script>'),
+            {"Content-Type": "text/html"}))
+        scanner = ScanerNetworkResources(scope=["example.com"])
+        found, _ = await scanner._fetch_network_sources("https://www.example.com/de/", ["example.com"], PSL, {}, session)
+        self.assertCountEqual([item.script_url for item in found], [
+            "https://www.example.com/de/js/m.js", "https://www.example.com/lazy.js", "https://static.example.com/s.js",
+        ])
+
+    async def test_bot_challenge_page_contributes_no_resources(self):
+        session = session_returning(response(
+            400, '<script src="/149e/ips.js?KP_UIDz=PRIVATEFIXTUREONLY"></script>',
+            {"Content-Type": "text/html", "x-kpsdk-ct": "token"}))
+        scanner = ScanerNetworkResources(scope=["example.com"])
+        self.assertEqual(await scanner._fetch_network_sources(PAGE, ["example.com"], PSL, {}, session), ([], []))
+        self.assertEqual(scanner.pages, {PAGE})
+        self.assertEqual(dict(scanner.outcomes), {"bot challenge": 1})
+
     async def test_unreadable_page_is_recorded_without_candidates(self):
         session = session_returning(response(200, "", {"Content-Type": "application/pdf"}))
         scanner = ScanerNetworkResources(scope=["example.com"])
