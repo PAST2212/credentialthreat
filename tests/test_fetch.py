@@ -313,5 +313,57 @@ class BlockedLoopTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(blocked), 1)
 
 
+class LargeHeaderTests(unittest.IsolatedAsyncioTestCase):
+    # A production page sent an 8,249-byte Content-Security-Policy header. aiohttp rejects any header line over
+    # 8,190 bytes by default with a ClientResponseError, so the page, its links and its resources were lost.
+    async def test_page_with_a_long_header_field_is_read(self):
+        from credentialthreat.core.fetch import website_session
+
+        app = web.Application()
+        app.router.add_get("/", lambda request: web.Response(
+            text="<html>ok</html>", content_type="text/html",
+            headers={"Content-Security-Policy": "script-src " + "'sha256-x' " * 1000}))
+        runner = web.AppRunner(app)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        await web.SockSite(runner, listener).start()
+        url = "http://127.0.0.1:%d/" % listener.getsockname()[1]
+
+        outcomes = Counter()
+        async with website_session(aiohttp.TCPConnector(force_close=True), aiohttp.ClientTimeout(total=10)) as session:
+            page = await fetch_text(session, url, {}, outcomes=outcomes)
+        self.assertEqual(outcomes, Counter({"ok": 1}))
+        self.assertEqual(page.text, "<html>ok</html>")
+
+    async def test_every_website_stage_opens_its_session_with_the_long_header_limits(self):
+        from credentialthreat.core.credentialsearch import ScanerCredentials
+        from credentialthreat.core.internallinksearch import ScanerInternalLinks
+        from credentialthreat.core.networksearch import ScanerNetworkResources
+        from credentialthreat.core.website import SUFFIXES
+
+        stages = {
+            "links": lambda: ScanerInternalLinks().process_internal_links(fqdns=[], tld_extract=SUFFIXES),
+            "pages": lambda: ScanerNetworkResources().process_network_sources(
+                network_points=[], domains_input=[], tld_extract=SUFFIXES),
+            "resources": lambda: ScanerCredentials().process_credentials(network_files=[]),
+        }
+        original = aiohttp.ClientSession.__init__
+        for stage, run in stages.items():
+            with self.subTest(stage=stage):
+                opened = []
+
+                def record(session, *args, **kwargs):
+                    opened.append(kwargs)
+                    original(session, *args, **kwargs)
+
+                with patch.object(aiohttp.ClientSession, "__init__", record):
+                    await run()
+                self.assertEqual(len(opened), 1)
+                self.assertGreaterEqual(opened[0].get("max_field_size", 8190), 9000)
+                self.assertGreaterEqual(opened[0].get("max_line_size", 8190), 9000)
+
+
 if __name__ == "__main__":
     unittest.main()

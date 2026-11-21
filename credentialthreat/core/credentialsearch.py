@@ -8,7 +8,7 @@ from collections import Counter
 from urllib.parse import urlsplit
 import aiohttp
 from aiolimiter import AsyncLimiter
-from credentialthreat.core.fetch import HostPacer, Page, fetch_text, get_header
+from credentialthreat.core.fetch import HostPacer, Page, fetch_text, get_header, website_session
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
 from credentialthreat.core.website import PublicDestinationConnector, module_imports, report_origin, resolve_reference
 
@@ -175,7 +175,7 @@ class ScanerCredentials:
 
         all_results = []
         try:
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with website_session(connector, timeout) as session:
                 results = await self.cancellation_manager.run_window(
                     network_files, lambda url_tuple: self._get_request(url_tuple, header, session), self.window_size)
                 all_results = [result for result in results if isinstance(result, tuple)]

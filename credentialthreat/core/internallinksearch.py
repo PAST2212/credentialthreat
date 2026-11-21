@@ -12,7 +12,7 @@ from bs4 import XMLParsedAsHTMLWarning
 import aiohttp
 import tldextract
 from collections import Counter
-from credentialthreat.core.fetch import HostPacer, fetch_text, get_header
+from credentialthreat.core.fetch import HostPacer, fetch_text, get_header, website_session
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
 from credentialthreat.core.networksearch import ScanerNetworkResources, ScrapNetworkUrls
 from credentialthreat.core.website import PublicDestinationConnector, canonical_url, is_binary_url
@@ -98,7 +98,7 @@ class ScanerInternalLinks:
 
         all_results: set = set()
         try:
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with website_session(connector, timeout) as session:
                 results = await self.cancellation_manager.run_window(
                     fqdns, lambda fqdn: self._fetch_internal_links(fqdn, tld_extract, header, session), self.window_size)
                 all_results = {link for links in results if isinstance(links, set) for link in links}

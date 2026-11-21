@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 from bs4 import MarkupResemblesLocatorWarning
 from bs4 import XMLParsedAsHTMLWarning
 from credentialthreat.core.credentialsearch import ScanerCredentials
-from credentialthreat.core.fetch import HostPacer, Page, fetch_text, get_header
+from credentialthreat.core.fetch import HostPacer, Page, fetch_text, get_header, website_session
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
 from credentialthreat.core.website import (PublicDestinationConnector, canonical_url, module_imports, report_origin,
                                            resolve_reference, url_in_scope)
@@ -162,7 +162,7 @@ class ScanerNetworkResources:
         all_results = []
         all_candidates = []
         try:
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with website_session(connector, timeout) as session:
                 results = await self.cancellation_manager.run_window(
                     network_points,
                     lambda url: self._fetch_network_sources(url, domains_input, tld_extract, header, session),

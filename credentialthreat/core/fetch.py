@@ -31,6 +31,17 @@ BINARY_CONTENT = re.compile(
     r"|vnd\.ms-|msword|vnd\.openxmlformats|wasm))", re.IGNORECASE)
 
 
+# aiohttp rejects a header line over 8,190 bytes by default. A production page sent an 8,249-byte
+# Content-Security-Policy, so the page, its links and its resources were lost.
+MAX_HEADER_BYTES = 64 * 1024
+
+
+def website_session(connector: aiohttp.BaseConnector, timeout: aiohttp.ClientTimeout) -> aiohttp.ClientSession:
+    """The HTTP session of a website stage, which accepts header lines up to MAX_HEADER_BYTES."""
+    return aiohttp.ClientSession(connector=connector, timeout=timeout,
+                                 max_line_size=MAX_HEADER_BYTES, max_field_size=MAX_HEADER_BYTES)
+
+
 class HostPacer:
     """Per-host request pacing inside one worker process (additive increase, multiplicative decrease).
 
