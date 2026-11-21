@@ -245,6 +245,10 @@ async def fetch_text(session, url: str, headers: dict, *, scope=(), limiter=None
             except (aiohttp.ClientConnectionError, aiohttp.InvalidURL) as exc:
                 outcomes[connection_failure(exc)] += 1
                 return None
+            except aiohttp.ClientResponseError:
+                # The answer could not be parsed as HTTP, for example binary data from a push or VPN endpoint on 443.
+                outcomes["invalid response"] += 1
+                return None
             except Exception as exc:
                 logger.error("Website request failed (%s)", type(exc).__name__)
                 outcomes["error"] += 1

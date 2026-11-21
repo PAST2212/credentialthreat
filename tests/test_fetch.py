@@ -225,6 +225,14 @@ class FetchTests(unittest.IsolatedAsyncioTestCase):
         page = await self.fetch(session_returning(response(500, "debug trace")))
         self.assertEqual((page.status, page.text), (500, "debug trace"))
 
+    async def test_a_response_that_is_not_http_is_counted_apart_from_errors(self):
+        # Push and VPN endpoints answer on port 443 with binary data; aiohttp raises ClientResponseError("Expected
+        # HTTP/"). Counted and logged as "error", these hid the requests that the scanner itself got wrong.
+        parse_error = aiohttp.ClientResponseError(Mock(), (), status=400, message="Expected HTTP/: PRIVATEFIXTUREONLY")
+        with self.assertNoLogs("credentialthreat.core.fetch", level="ERROR"):
+            self.assertIsNone(await self.fetch(session_returning(parse_error)))
+        self.assertEqual(self.outcomes, Counter({"invalid response": 1}))
+
     async def test_error_status_bodies_are_counted_apart_from_ok(self):
         for status in (400, 403, 404, 500):
             with self.subTest(status=status):
