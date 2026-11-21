@@ -113,6 +113,19 @@ Two classes of pages account for the one page with candidates fewer:
 
 Eight page requests in run 3 still ended at a start page. Their URLs differ from the start URL, for example by a query string, and redirect to it.
 
+Run 4 used all fixes. One host answered slowly during this run: its pages took up to 47 s, and 107 of its resources returned HTTP 502. Runs 2 and 3 had sent the same requests to it without a single 502, so the cause lay with the host. Without it, 90% of the pages were read after 10.8 s. The host had no candidates in run 3.
+
+| Site B | Run 3 | Run 4: all fixes |
+| --- | ---: | ---: |
+| Pages / resources requested | 466 / 1,119 | 429 / 1,061 |
+| Page stage: elapsed | 28.3 s | 47.7 s, held by the slow host |
+| Page stage: worker CPU / matching per MB | 92 s / 0.44 s | 59 s / 0.27 s |
+| Event loop blocked per page worker (longest block) | 15–18 s (3.0 s) | 9–11 s (1.6 s) |
+| Unverified candidates (affected resources) | 235 (82) | 79 (79) |
+| Peak RSS of the process tree | 664 MiB | 657 MiB |
+
+Every candidate that run 4 no longer reported belonged to one of the fixed classes: key IDs of presigned URLs, matches across properties and `use-credentials`. The remaining 79 are 76 JWT-shaped strings, 70 of them the widget token of the template pages, two public API keys and one ID in commented-out code.
+
 ### Coverage of scripts
 
 Two pages were loaded in a browser, and the scripts recorded by `performance.getEntriesByType("resource")` were compared with the URLs the scanner requested. The browser was not given cookie consent.
@@ -150,5 +163,7 @@ The module imports worked as intended. 164 imported modules in run 1 and 296 in 
 - Pages are found only through links on the start pages.
 - Bot-management services other than Kasada and Cloudflare are not recognized. A challenge from another service counts as an error status, and its body is scanned like any other error page.
 - Peak RSS reached 724 MiB with five workers. The workers alone took about 530 MiB during the link stage, before any large page was parsed.
+- Matching still binds the page stage to the CPU. The alternation over the field names costs about 0.17 s per MB, and in run 4 the event loop of each page worker was blocked for 9–11 s.
+- The JWT rule reports every JWT-shaped string, whatever its role. On Site B, 76 of the 79 remaining candidates were such strings, most of them one widget token per template page.
 
 The harness is not part of the repository.
