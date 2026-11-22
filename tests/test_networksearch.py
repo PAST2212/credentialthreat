@@ -118,6 +118,12 @@ class ResourceExtractionTests(unittest.TestCase):
             "https://www.example.com/css/site.css", "https://www.example.com/js/boot.js",
             "https://www.example.com/js/module.mjs", "https://www.example.com/site.webmanifest"])
 
+    def test_xml_and_svg_references_are_resources(self):
+        for markup, attr, expected in (('<link href="/config/settings.xml">', "href", "/config/settings.xml"),
+                                       ('<object data="img/chart.svg"></object>', "data", "/p/img/chart.svg")):
+            with self.subTest(markup=markup):
+                self.assertEqual(extracted(markup, attr), ["https://www.example.com" + expected])
+
     def test_binary_and_out_of_scope_references_are_dropped(self):
         for markup, attr in (('<link href="/img/logo.png">', "href"),
                              ('<link href="//cdn.other.invalid/a.js">', "href"),

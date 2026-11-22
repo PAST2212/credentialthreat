@@ -64,6 +64,13 @@ class BinaryUrlTests(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertFalse(is_binary_url(url))
 
+    def test_xml_and_svg_files_are_text(self):
+        # Both are XML text: configuration files and feeds can hold values, and SVG can carry script.
+        for url in ("https://h.example.com/config/settings.xml", "https://h.example.com/feed.XML",
+                    "https://h.example.com/img/icon.svg"):
+            with self.subTest(url=url):
+                self.assertFalse(is_binary_url(url))
+
 
 if __name__ == "__main__":
     unittest.main()

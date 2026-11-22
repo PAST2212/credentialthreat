@@ -96,9 +96,10 @@ def url_in_scope(value: str, domains: list[str]) -> bool:
         return False
 
 
+# Not xml or svg: both are XML text, configuration files and feeds can hold values, and SVG can carry script.
 BINARY_EXTENSIONS = frozenset((
-    "jpg", "png", "gif", "jpeg", "bmp", "webp", "woff2", "woff", "ico", "svg", "mp3", "mp4",
-    "mpeg", "mpg", "avi", "zip", "rar", "tar", "gz", "pdf", "ttf", "exe", "xml", "app",
+    "jpg", "png", "gif", "jpeg", "bmp", "webp", "woff2", "woff", "ico", "mp3", "mp4",
+    "mpeg", "mpg", "avi", "zip", "rar", "tar", "gz", "pdf", "ttf", "exe", "app",
 ))
 
 
