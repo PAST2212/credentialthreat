@@ -1,0 +1,156 @@
+import functools
+from ipaddress import IPv4Address, IPv4Network, IPv6Network, ip_address
+import os
+import re
+import ssl
+from urllib.parse import urljoin
+
+import aiohttp
+from requests.certs import where as public_ca_bundle
+import tldextract
+from yarl import URL
+
+
+# Scope decisions and reporting use the bundled suffix list, including private suffixes.
+SUFFIXES = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
+DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+# Treat the whole special-purpose blocks conservatively across Python 3.12 patch versions.
+IPV4_SPECIAL = (IPv4Network("192.0.0.0/24"), IPv4Network("192.88.99.0/24"))
+IPV6_GLOBAL_UNICAST = IPv6Network("2000::/3")
+IPV6_SPECIAL = (IPv6Network("2001::/23"), IPv6Network("2002::/16"), IPv6Network("3fff::/20"))
+
+
+def _public_destination(host: str) -> bool:
+    if not isinstance(host, str):
+        return False
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    if not address.is_global or address.is_multicast:
+        return False
+    if isinstance(address, IPv4Address):
+        return not any(address in block for block in IPV4_SPECIAL)
+    return (address.scope_id is None and address in IPV6_GLOBAL_UNICAST
+            and not any(address in block for block in IPV6_SPECIAL))
+
+
+class DestinationBlocked(OSError):
+    """The DNS answer failed the public destination check."""
+
+
+def load_tls_context() -> ssl.SSLContext:
+    """The system's roots plus the public CA bundle that `requests` ships, unless SSL_CERT_FILE or SSL_CERT_DIR is set.
+
+    On Windows Python reads only the roots Windows has already installed, while Windows itself downloads missing
+    ones on demand. A valid chain that needs such a root would otherwise fail verification.
+    """
+    context = ssl.create_default_context()
+    if not (os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR")):
+        context.load_verify_locations(cafile=public_ca_bundle())
+    return context
+
+
+@functools.cache
+def shared_tls_context() -> ssl.SSLContext:
+    """One context per process, because loading the bundle takes about 0.25 s."""
+    return load_tls_context()
+
+
+class PublicDestinationConnector(aiohttp.TCPConnector):
+    def __init__(self, *args, ssl=True, **kwargs):
+        # `True` is aiohttp's verified default context; verify against the wider trust store instead.
+        super().__init__(*args, ssl=shared_tls_context() if ssl is True else ssl, **kwargs)
+
+    async def _resolve_host(self, host, port, traces=None):
+        # In the pinned aiohttp this also returns literal IPs and DNS-cache hits.
+        # Returning these same records avoids a second resolution before connecting.
+        answers = await super()._resolve_host(host, port, traces=traces)
+        if not answers or not all(_public_destination(answer["host"]) for answer in answers):
+            raise DestinationBlocked("Destination requires public unicast addresses")
+        return answers
+
+
+def dns_name(host: str) -> str:
+    try:
+        name = URL.build(scheme="https", host=host.removesuffix(".")).raw_host or ""
+    except (ValueError, UnicodeError):
+        return ""
+    if len(name) > 253 or not all(DNS_LABEL.fullmatch(label) for label in name.split(".")):
+        return ""
+    return name
+
+
+def host_in_scope(host: str, domains: list[str]) -> bool:
+    host = dns_name(host)
+    return bool(host) and any(host == root or host.endswith("." + root) for root in domains if root)
+
+
+def url_in_scope(value: str, domains: list[str]) -> bool:
+    try:
+        url = URL(value)
+        return (url.scheme in ("https", "http") and url.raw_user is None and url.raw_password is None
+                and url.port is not None and host_in_scope(url.raw_host or "", domains))
+    except (ValueError, UnicodeError):
+        return False
+
+
+# Not xml or svg: both are XML text, configuration files and feeds can hold values, and SVG can carry script.
+BINARY_EXTENSIONS = frozenset((
+    "jpg", "png", "gif", "jpeg", "bmp", "webp", "woff2", "woff", "ico", "mp3", "mp4",
+    "mpeg", "mpg", "avi", "zip", "rar", "tar", "gz", "pdf", "ttf", "exe", "app",
+))
+
+
+def canonical_url(value: str) -> str | None:
+    """One spelling per fetchable page: http(s) only, no userinfo or fragment, '/' for an empty path."""
+    try:
+        url = URL(value)
+        if url.scheme not in ("https", "http") or url.raw_user is not None or url.raw_password is not None:
+            return None
+        host = dns_name(url.raw_host or "")
+        if not host:
+            return None
+        return str(URL.build(scheme=url.scheme, host=host, port=url.explicit_port if not url.is_default_port() else None,
+                             path=url.raw_path or "/", query_string=url.raw_query_string, encoded=True))
+    except (ValueError, UnicodeError, TypeError):
+        return None
+
+
+def is_binary_url(value: str) -> bool:
+    """True when the URL path ends in a file extension that never holds scannable text."""
+    try:
+        name = URL(value).path.rsplit("/", 1)[-1]
+    except (ValueError, UnicodeError, TypeError):
+        return False
+    return "." in name and name.rsplit(".", 1)[-1].lower() in BINARY_EXTENSIONS
+
+
+def resolve_reference(base_url: str, reference: str, scope) -> str | None:
+    """Absolute, canonical, in-scope URL of a text resource that `base_url` references, or None."""
+    full_url = canonical_url(urljoin(base_url, reference))
+    if full_url and url_in_scope(full_url, scope) and not is_binary_url(full_url):
+        return full_url
+    return None
+
+
+# Static (`import ... from`, `export ... from`, `import "x"`) and dynamic (`import("x")`) ES module imports whose
+# specifier a browser loads without an import map: relative to the script (./, ../, /) or an absolute http(s) URL.
+MODULE_IMPORT = re.compile(r"""(?:\b(?:from|import)\s*|\bimport\s*\(\s*)(["'])((?:\.{0,2}/|https?://)[^"'\s]+)\1""")
+
+
+def module_imports(script: str) -> list[str]:
+    """Literal module specifiers a browser would fetch for this script, in order of appearance."""
+    return [match.group(2) for match in MODULE_IMPORT.finditer(script)]
+
+
+def report_origin(value: str) -> str:
+    """Exclude userinfo, paths, query strings and fragments from findings."""
+    try:
+        url = URL(value)
+        if url.scheme in ("https", "http") and dns_name(url.raw_host or ""):
+            return str(url.origin())
+    except (ValueError, UnicodeError):
+        pass
+    return "[unknown origin]"

@@ -1,2 +1,0 @@
-# put here your domains line by line you want scan for leaked credentials
-hackerone.com

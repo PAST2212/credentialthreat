@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 
-import re
 import asyncio
 from html import unescape
+from urllib.parse import urljoin
 import logging
 from typing import Union
 import warnings
-from colorama import Fore, Style
 from bs4 import BeautifulSoup
 from bs4 import MarkupResemblesLocatorWarning
 from bs4 import XMLParsedAsHTMLWarning
 import aiohttp
-from aiohttp.client_exceptions import ServerConnectionError, ClientResponseError
 import tldextract
-from tenacity import retry, stop_after_attempt, retry_if_exception_type, wait_exponential
-from credentialthreat.core import utils
+from collections import Counter
+from credentialthreat.core.fetch import HostPacer, fetch_text, get_header, website_session
+from credentialthreat.core.interrupt_handler import AsyncCancellationManager
+from credentialthreat.core.networksearch import ScanerNetworkResources, ScrapNetworkUrls
+from credentialthreat.core.website import PublicDestinationConnector, canonical_url, is_binary_url
 from aiolimiter import AsyncLimiter
 
 logger = logging.getLogger(__name__)
@@ -24,138 +25,95 @@ warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 
 class ScanerInternalLinks:
-    def __init__(self, max_concurrent_requests: int = 25, batch_size: int = 50) -> None:
-        self.pattern_bytes_files = re.compile(
-            r"(?=:\s)?(?:https?://)?[./]*[\w/.]+'\.(?:jpg|png|gif|jpeg|bmp|webp|woff2|"
-            r"woff|ico|svg|mp3|mp4|mpeg|mpg|avi|zip|rar|tar|gz|pdf|ttf|exe|xml|app)",
-            re.IGNORECASE
-        )
+    def __init__(self, max_concurrent_requests: int = 25, window_size: int = 50, scope=(),
+                 host_connections: int | None = None) -> None:
         self.max_concurrent_requests = max_concurrent_requests
-        self.batch_size = batch_size
+        self.host_connections = host_connections or max_concurrent_requests  # this worker's share
+        self.window_size = window_size  # requests in flight per worker process
         self.rate_limiter = AsyncLimiter(max_concurrent_requests, 1)
-        self.blacklist: set[str] = set()
+        self.pacer = HostPacer(rate=max_concurrent_requests, connections=self.host_connections)  # per host: pacing, 429/503 backoff, request slots
+        self.scope = tuple(scope)
+        self.cancellation_manager = AsyncCancellationManager()
+        self.outcomes: Counter = Counter()
+        # The page stage does not request the start pages again, so they are scanned here like any other page.
+        self.pages: set[str] = set()  # start URLs requested here, read or not, and their final URLs
+        self.resources: list[ScrapNetworkUrls] = []  # resources the start pages reference
+        self.candidates: list[tuple] = []  # redacted candidates in the start page texts
+        self.page_scanner = ScanerNetworkResources()  # only its parsing and rules are used; it sends no requests
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=(
-                retry_if_exception_type(ClientResponseError) |
-                retry_if_exception_type(asyncio.TimeoutError) |
-                retry_if_exception_type(ServerConnectionError)
-        )
-    )
-    async def _get_request(self, url: str, header: dict, session: aiohttp.ClientSession) -> Union[BeautifulSoup, None]:
-        try:
-            async with self.rate_limiter:
-                async with session.get(url, headers=header, allow_redirects=True, max_redirects=5) as response:
-                    html = await response.text('utf-8', 'ignore')
-                    soup = BeautifulSoup(html, 'html.parser')
-                    return soup
-
-        # NX Subdomains and SSL Subdomains Errors
-        except (aiohttp.client_exceptions.ClientConnectorError, aiohttp.client_exceptions.ClientConnectorSSLError, aiohttp.ClientOSError, aiohttp.client_exceptions.InvalidURL, aiohttp.client_exceptions.ServerDisconnectedError, aiohttp.client_exceptions.ServerTimeoutError):
-            self.blacklist.add(url)
+    async def _get_request(self, url: str, header: dict, session: aiohttp.ClientSession) -> Union[tuple[str, str, BeautifulSoup], None]:
+        """Final page URL, page text and parsed markup, or None when the page could not be read."""
+        page = await fetch_text(session, url, header, scope=self.scope, limiter=self.rate_limiter,
+                                pacer=self.pacer, outcomes=self.outcomes)
+        if page is None:
             return None
+        return page.url, page.text, self.page_scanner.parse(page)
 
-        except Exception as e:
-            logger.error(f"Exception: {str(type(e))}. Unsuccessful Connection Attempt to URL {url}. Exception Message: {str(e)}")
-            self.blacklist.add(url)
-            return None
-
-    def _process_link(self, link: str, domain: str, tld_extract: tldextract.tldextract.TLDExtract) -> Union[str, None]:
+    @staticmethod
+    def _process_link(link: str, page_url: str) -> Union[str, None]:
+        """Resolve an href against the page it appeared on; only fetchable, non-binary pages remain."""
         try:
             link = unescape(link.strip())
-            if link.startswith('javascript:'):
+            if not link:
                 return None
-
-            domain_name = tld_extract(link).domain
-            if len(domain_name) != 0 and domain_name in domain:
-                if self.pattern_bytes_files.search(link) is None:
-                    return link
-
-            if link.startswith('////') and len(link) > 4:
-                link_transformed = 'https://' + link[4:]
-            elif link.startswith('//') and len(link) > 2:
-                link_transformed = 'https://' + link[2:]
-            elif link.startswith('/'):
-                link_transformed = 'https://' + domain + link
-            elif link.startswith('./'):
-                link_transformed = 'https://' + domain + link[1:]
-            else:
-                if not any(link.startswith(prefix) for prefix in ('https://', 'http://', '#')):
-                    link_transformed = 'https://' + domain + '/' + link
-                else:
-                    return None
-
-            if self.pattern_bytes_files.search(link_transformed) is None:
-                return link_transformed
-
+            url = canonical_url(urljoin(page_url, link))
         except (AttributeError, ValueError):
-            pass
-
-        return None
+            return None
+        if url is None or is_binary_url(url):
+            return None
+        return url
 
     async def _fetch_internal_links(self, domain: str, tld_extract: tldextract.tldextract.TLDExtract, header: dict, session: aiohttp.ClientSession):
         results: set = set()
-        url = 'https://' + domain
+        start_url = 'https://' + domain + '/'
+        self.pages.add(start_url)
         try:
-            if soup := await self._get_request(url, header, session):
-                results.add(url)
+            if fetched := await self._get_request(start_url, header, session):
+                page_url, text, soup = fetched
+                self.pages.add(page_url)
+                results.add(page_url)
+                resources, candidates = self.page_scanner.scan_page(page_url, text, soup, self.scope)
+                self.resources.extend(resources)
+                self.candidates.extend(candidates)
                 for anchor in soup.find_all('a'):
                     href = anchor.get("href")
                     if href:
-                        if processed_link := self._process_link(href, domain, tld_extract):
+                        if processed_link := self._process_link(href, page_url):
                             results.add(processed_link)
         except Exception as e:
-            logger.error(f"Error processing {url}: {str(e)}")
-            self.blacklist.add(url)
+            logger.error("Internal link processing failed (%s)", type(e).__name__)
 
         return results
 
-    async def _get_internal_links(self, urls: list[str], tld_extract: tldextract.tldextract.TLDExtract, header: dict, session: aiohttp.ClientSession):
-        tasks = [self._fetch_internal_links(fqdn, tld_extract, header, session) for fqdn in urls]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return [r for sublist in results if isinstance(sublist, set) for r in sublist]
-
     async def process_internal_links(self, fqdns: list[str], tld_extract: tldextract.tldextract.TLDExtract):
-        FG, BT, FR, FY, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Fore.YELLOW, Style.RESET_ALL
-        connector = aiohttp.TCPConnector(
-            ssl=False,
-            limit_per_host=self.max_concurrent_requests,
+        connector = PublicDestinationConnector(
+            limit_per_host=self.host_connections,
             force_close=False,
             keepalive_timeout=300,
             enable_cleanup_closed=True,
             ttl_dns_cache=600
         )
         timeout = aiohttp.ClientTimeout(total=45, sock_read=30, sock_connect=5)
-        header = utils.get_header()
+        header = get_header()
 
         all_results: set = set()
-        total_batches = (len(fqdns) + self.batch_size - 1) // self.batch_size
         try:
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                for batch_num, i in enumerate(range(0, len(fqdns), self.batch_size), 1):
-                    batch = fqdns[i:i + self.batch_size]
-                    try:
-                        logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Full Qualified Domain Names" + S)
-                        results = await self._get_internal_links(batch, tld_extract, header, session)
-                        all_results.update(results)
-                        logger.info(FG + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Full Qualified Domain Names" + S)
-                        if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains/URLs with 50 batch_size)
-                            pause_time = min(len(batch) / 100, 3)
-                            await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
-
-                    except Exception as e:
-                        logger.error(f"Batch {batch_num} failed: {str(e)}")
-                        continue
+            async with website_session(connector, timeout) as session:
+                results = await self.cancellation_manager.run_window(
+                    fqdns, lambda fqdn: self._fetch_internal_links(fqdn, tld_extract, header, session), self.window_size)
+                all_results = {link for links in results if isinstance(links, set) for link in links}
 
         except (asyncio.CancelledError, KeyboardInterrupt):
-            logger.info("\nOperation cancelled, cleaning up...")
+            logger.info("Operation cancelled, cleaning up...")
+            await self.cancellation_manager.cancel_all()
+        finally:
+            await connector.close()
 
         return all_results
 
-    async def get_results(self, fqdns: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[set[str], set[str]]:
+    async def get_results(self, fqdns: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[set[str], list[ScrapNetworkUrls], set[str], list[tuple], dict[str, int]]:
+        """Links found on the hosts' start pages, the resources these pages reference, the page URLs requested,
+        the redacted candidates in the page texts, and the request outcome counts."""
         logging.basicConfig(level=logging.INFO, format='%(message)s')
-        scraper = ScanerInternalLinks()
-        results = await scraper.process_internal_links(fqdns=fqdns, tld_extract=tld_extract)
-        return results, self.blacklist
+        results = await self.process_internal_links(fqdns=fqdns, tld_extract=tld_extract)
+        return results, self.resources, self.pages, self.candidates, dict(self.outcomes)

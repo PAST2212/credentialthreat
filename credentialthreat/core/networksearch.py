@@ -2,28 +2,37 @@
 
 import re
 import asyncio
-from urllib.parse import urljoin
 from dataclasses import dataclass
 import logging
 import warnings
-from colorama import Fore, Style
 from typing import Union
 import tldextract
 import json
+from collections import Counter
 import aiohttp
-from aiohttp.client_exceptions import ServerConnectionError, ServerTimeoutError, ServerDisconnectedError, ClientConnectorSSLError, InvalidURL, ClientResponseError, ClientPayloadError, ClientConnectionError, ClientOSError, ClientConnectorError, ClientProxyConnectionError
 from aiolimiter import AsyncLimiter
-from bs4 import BeautifulSoup, SoupStrainer
+from bs4 import BeautifulSoup
 from bs4 import MarkupResemblesLocatorWarning
 from bs4 import XMLParsedAsHTMLWarning
-from tenacity import retry, stop_after_attempt, retry_if_exception_type, wait_exponential
-from credentialthreat.core import utils
+from credentialthreat.core.credentialsearch import ScanerCredentials, script_imports
+from credentialthreat.core.fetch import HostPacer, Page, fetch_text, get_header, website_session
+from credentialthreat.core.interrupt_handler import AsyncCancellationManager
+from credentialthreat.core.website import (PublicDestinationConnector, canonical_url, module_imports, report_origin,
+                                           resolve_reference, url_in_scope)
 
 
 logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
+
+
+def is_translation(link) -> bool:
+    """A <link rel="alternate" hreflang> names the page in another language, with the same scripts and values.
+
+    One help page listed 108 translations of itself; following them made translations 88% of a scan's resources.
+    """
+    return bool(link.get("hreflang")) and "alternate" in (rel.lower() for rel in link.get("rel") or ())
 
 
 @dataclass
@@ -33,55 +42,40 @@ class ScrapNetworkUrls:
 
 
 class ScanerNetworkResources:
-    def __init__(self, max_concurrent_requests: int = 25, batch_size: int = 50) -> None:
-        self.pattern_bytes_files = re.compile(
-            r"(?=:\s)?(?:https?://)?[./]*[\w/.]+'\.(?:jpg|png|gif|jpeg|bmp|webp|woff2|"
-            r"woff|ico|svg|mp3|mp4|mpeg|mpg|avi|zip|rar|tar|gz|pdf|ttf|exe|xml|app)",
-            re.IGNORECASE
-        )
-        self.blacklist: set[str] = set()
+    def __init__(self, max_concurrent_requests: int = 25, window_size: int = 50, scope=(),
+                 host_connections: int | None = None) -> None:
+        self.pages: set[str] = set()  # page URLs requested here, read or not, including redirect targets
+        self.matcher = ScanerCredentials()  # only its rules are used; it sends no requests
         self.max_concurrent_requests = max_concurrent_requests
-        self.batch_size = batch_size
+        self.host_connections = host_connections or max_concurrent_requests  # this worker's share
+        self.window_size = window_size  # requests in flight per worker process
         self.rate_limiter = AsyncLimiter(max_concurrent_requests, 1)
-        self.strainer = SoupStrainer(['script', 'link'])
+        self.pacer = HostPacer(rate=max_concurrent_requests, connections=self.host_connections)  # per host: pacing, 429/503 backoff, request slots
+        self.cancellation_manager = AsyncCancellationManager()
+        self.scope = tuple(scope)
+        self.outcomes: Counter = Counter()
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=(
-                retry_if_exception_type(ClientResponseError) |
-                retry_if_exception_type(asyncio.TimeoutError) |
-                retry_if_exception_type(ServerConnectionError)
-        )
-    )
-    async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, BeautifulSoup]:
-        try:
-            async with self.rate_limiter:
-                async with session.get(url, headers=header, allow_redirects=True, max_redirects=5) as response:
-                    content_type = response.headers.get('content-type', '').lower()
-                    text = await response.text('utf-8', 'ignore')
+    @staticmethod
+    def parse(page: Page) -> BeautifulSoup:
+        """The page's markup for link and resource extraction."""
+        markup = page.text
+        # WordPress JSON API responses embed HTML with escaped URLs; re-serializing unescapes them.
+        if 'application/json' in page.content_type:
+            try:
+                markup = f"<html><body>{json.dumps(json.loads(markup))}</body></html>"
+            except json.JSONDecodeError:
+                pass
+        return BeautifulSoup(markup, 'html.parser')
 
-                    # Handle JSON responses differently; WordPress JSON API responses
-                    if 'application/json' in content_type:
-                        try:
-                            # Parse JSON and convert to HTML for BeautifulSoup
-                            json_data = json.loads(text)
-                            # Create a simple HTML wrapper for JSON content
-                            html_content = f"<html><body>{json.dumps(json_data)}</body></html>"
-                            return BeautifulSoup(html_content, 'html.parser')
-                        except json.JSONDecodeError:
-                            pass
-
-                    return BeautifulSoup(text, 'html.parser')
-
-        except (ClientConnectionError, ClientOSError, ClientPayloadError, ClientConnectorError, ClientProxyConnectionError, InvalidURL, ClientConnectorSSLError, ServerDisconnectedError, ServerTimeoutError):
-            self.blacklist.add(url)
+    async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, tuple[Page, BeautifulSoup]]:
+        """The page as read (final URL, status, text, content type) and its parsed markup, or None when it could not be read."""
+        # Parsing or matching another page can block this worker's loop past sock_connect and turn a connection
+        # that succeeded into a connect timeout, so retry once (a dead host costs one more connect timeout).
+        page = await fetch_text(session, url, header, scope=self.scope, limiter=self.rate_limiter,
+                                pacer=self.pacer, outcomes=self.outcomes, connect_retries=1)
+        if page is None:
             return None
-
-        except Exception as e:
-            logger.error(f"Exception: {str(type(e))}. Unsuccessful Connection Attempt to URL {url}. Exception Message: {str(e)}")
-            self.blacklist.add(url)
-            return None
+        return page, self.parse(page)
 
     @staticmethod
     def _clean_url(url: str) -> str:
@@ -93,108 +87,114 @@ class ScanerNetworkResources:
             # Remove unnecessary escaping
             url = re.sub(r'\\+', '/', url)
 
-            # Fix double slashes (except in protocol)
-            url = re.sub(r'(?<!:)/{2,}', '/', url)
+            # Fix double slashes inside the path; keep the scheme separator and protocol-relative '//host'
+            url = re.sub(r'(?<=[^:/])/{2,}', '/', url)
 
             # Remove any query params that look like JSON or escaped content
             url = re.sub(r'\?.*=\\.*', '', url)
 
             return url.strip('"\'')
         except Exception as e:
-            logger.error(f"Error cleaning URL {url}: {str(e)}")
+            logger.error("URL normalization failed (%s)", type(e).__name__)
             return url
 
     def _extract_url(self, element: BeautifulSoup, attr: str, base_url: str, domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> list[ScrapNetworkUrls]:
         results = []
         if url := element.attrs.get(attr):
-            url = self._clean_url(url)
-            full_url = urljoin(base_url, url)
-            if not self.pattern_bytes_files.search(full_url):
-                for keyword in domains_input:
-                    if tld_extract(keyword).domain in tld_extract(full_url).fqdn:
-                        results.append(ScrapNetworkUrls(base_url, full_url))
+            if full_url := resolve_reference(base_url, self._clean_url(url), domains_input):
+                results.append(ScrapNetworkUrls(base_url, full_url))
         return results
 
-    async def _fetch_network_sources(self, url: str, domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract, header, session: aiohttp.ClientSession) -> list[ScrapNetworkUrls]:
+    def scan_page(self, url: str, text: str, soup: BeautifulSoup, domains_input) -> tuple[list[ScrapNetworkUrls], list[tuple]]:
+        """Resources a fetched page references, and the redacted candidates in its text."""
         results = []
+        candidates = []
+        if findings := self.matcher._findings(text):
+            candidates.append((report_origin(url), report_origin(url), findings))
+
+        for script in soup.find_all("script"):
+            results.extend(self._extract_url(script, 'src', url, domains_input, None))
+            results.extend(self._extract_url(script, 'data-src', url, domains_input, None))
+
+        for resource in soup.find_all(['link', 'iframe', 'frame', 'embed', 'object']):
+            if resource.name == "link" and is_translation(resource):
+                continue
+            for attr in ['href', 'src', 'data', 'data-src']:
+                results.extend(self._extract_url(resource, attr, url, domains_input, None))
+
+        for script in soup.find_all("script", src=None):  # inline scripts
+            if script_text := script.string:
+                # ES module imports, then the script loaders whose argument is a plain URL
+                references = module_imports(script_text)
+                for pattern in (r'require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
+                                r'importScripts\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
+                                r'loadScript\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)'):
+                    references.extend(match.group(1) for match in re.finditer(pattern, script_text))
+                for reference in references:
+                    if imported_url := resolve_reference(url, reference, domains_input):
+                        results.append(ScrapNetworkUrls(url, imported_url))
+        return results, candidates
+
+    async def _fetch_network_sources(self, url: str, domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract, header, session: aiohttp.ClientSession) -> tuple[list[ScrapNetworkUrls], list[tuple]]:
+        """Resources the page references, and the redacted candidates in the page text itself.
+
+        The page is fetched once here; the credential stage does not request it again.
+        """
+        results = []
+        candidates = []
         try:
-            url = self._clean_url(url)
-            if soup := await self._get_request(url, header, session):
-                results.append(ScrapNetworkUrls(url, url))
+            url = canonical_url(self._clean_url(url)) or ""
+            if not url_in_scope(url, domains_input):
+                return results, candidates
+            self.pages.add(url)
+            fetched = await self._get_request(url, header, session)
+            if fetched is not None:
+                page, soup = fetched
+                url = page.url
+                self.pages.add(url)
+                results, candidates = self.scan_page(url, page.text, soup, domains_input)
+                # A script in the page list (from a URL source, for example) is not fetched again in the
+                # credential stage, so the modules it imports become resources here.
+                results.extend(ScrapNetworkUrls(url, module) for module in script_imports(page, domains_input))
 
-                for script in soup.find_all("script"):
-                    results.extend(self._extract_url(script, 'src', url, domains_input, tld_extract))
-                    results.extend(self._extract_url(script, 'data-src', url, domains_input, tld_extract))
+        except Exception:
+            self.pages.add(url)
 
-                for resource in soup.find_all(['link', 'iframe', 'frame', 'embed', 'object']):
-                    for attr in ['href', 'src', 'data', 'data-src']:
-                        results.extend(self._extract_url(resource, attr, url, domains_input, tld_extract))
+        return results, candidates
 
-                for script in soup.find_all("script", src=None):  # inline scripts
-                    if script_text := script.string:
-                        # Look for dynamic imports
-                        import_patterns = [
-                            r'import\s+[\'"]([^\'"]+)[\'"]',
-                            r'require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
-                            r'importScripts\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
-                            r'loadScript\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)'
-                        ]
-                        for pattern in import_patterns:
-                            if matches := re.finditer(pattern, script_text):
-                                for match in matches:
-                                    imported_url = urljoin(url, match.group(1))
-                                    if not self.pattern_bytes_files.search(imported_url):
-                                        results.append(ScrapNetworkUrls(url, imported_url))
-
-        except:
-            self.blacklist.add(url)
-
-        return results
-
-    async def _get_network_sources(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract, header, session: aiohttp.ClientSession) -> list[ScrapNetworkUrls]:
-        tasks = [self._fetch_network_sources(url, domains_input, tld_extract, header, session) for url in network_points]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return [r for sublist in results if isinstance(sublist, list) for r in sublist]
-
-    async def process_network_sources(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> list[ScrapNetworkUrls]:
-        FG, BT, FR, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Style.RESET_ALL
-        connector = aiohttp.TCPConnector(
-            ssl=False,
-            limit_per_host=self.max_concurrent_requests,
+    async def process_network_sources(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[list[ScrapNetworkUrls], list[tuple]]:
+        connector = PublicDestinationConnector(
+            limit_per_host=self.host_connections,
             force_close=False,
             keepalive_timeout=300,
             enable_cleanup_closed=True,
             ttl_dns_cache=600
         )
         timeout = aiohttp.ClientTimeout(total=45, sock_read=30, sock_connect=5)
-        header = utils.get_header()
+        header = get_header()
 
         all_results = []
-        total_batches = (len(network_points) + self.batch_size - 1) // self.batch_size
+        all_candidates = []
         try:
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                for batch_num, i in enumerate(range(0, len(network_points), self.batch_size), 1):
-                    batch = network_points[i:i + self.batch_size]
-                    try:
-                        logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Internal Urls" + S)
-                        results = await self._get_network_sources(batch, domains_input, tld_extract, header, session)
-                        all_results.extend(results)
-                        logger.info(FG + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Internal Urls" + S)
-                        if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains/URLs with 50 batch_size)
-                            pause_time = min(len(batch) / 100, 3)
-                            await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
-
-                    except Exception as e:
-                        logger.error(f"Batch {batch_num} failed: {str(e)}")
-                        continue
+            async with website_session(connector, timeout) as session:
+                results = await self.cancellation_manager.run_window(
+                    network_points,
+                    lambda url: self._fetch_network_sources(url, domains_input, tld_extract, header, session),
+                    self.window_size)
+                scanned = [found for found in results if isinstance(found, tuple)]
+                all_results = [item for resources, _ in scanned for item in resources]
+                all_candidates = [candidate for _, candidates in scanned for candidate in candidates]
 
         except (asyncio.CancelledError, KeyboardInterrupt):
-            logger.info("\nOperation cancelled, cleaning up...")
+            logger.info("Operation cancelled, cleaning up...")
+            await self.cancellation_manager.cancel_all()
+        finally:
+            await connector.close()
 
-        return all_results
+        return all_results, all_candidates
 
-    async def get_results(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[list[ScrapNetworkUrls], set[str]]:
+    async def get_results(self, network_points: list[str], domains_input: list[str], tld_extract: tldextract.tldextract.TLDExtract) -> tuple[list[ScrapNetworkUrls], set[str], list[tuple], dict[str, int]]:
+        """Resources found on the pages, the page URLs requested, the redacted candidates in the page texts, and the request outcome counts."""
         logging.basicConfig(level=logging.INFO, format='%(message)s')
-        scraper = ScanerNetworkResources()
-        results = await scraper.process_network_sources(network_points=network_points, domains_input=domains_input, tld_extract=tld_extract)
-        return results, self.blacklist
+        results, candidates = await self.process_network_sources(network_points=network_points, domains_input=domains_input, tld_extract=tld_extract)
+        return results, self.pages, candidates, dict(self.outcomes)

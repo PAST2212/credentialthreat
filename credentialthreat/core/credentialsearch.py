@@ -4,26 +4,57 @@ import re
 import asyncio
 import logging
 from typing import Union
-from colorama import Fore, Style
-from tenacity import retry, stop_after_attempt, retry_if_exception_type, wait_exponential
+from collections import Counter
+from urllib.parse import urlsplit
 import aiohttp
-from aiohttp.client_exceptions import ServerConnectionError, ClientResponseError, ClientPayloadError, ClientConnectionError, ClientOSError, ClientConnectorError, ClientProxyConnectionError
 from aiolimiter import AsyncLimiter
-from credentialthreat.core import utils
+from credentialthreat.core.fetch import HostPacer, Page, fetch_text, get_header, website_session
+from credentialthreat.core.interrupt_handler import AsyncCancellationManager
+from credentialthreat.core.website import PublicDestinationConnector, module_imports, report_origin, resolve_reference
 
 
 logger = logging.getLogger(__name__)
 
+# Case-insensitive matching folds A-Z and these four letters onto ASCII lower case (dotted and dotless i, long s, Kelvin sign).
+# Each maps to exactly one character, so a folded copy keeps every span of the original text.
+CASE_FOLD = str.maketrans({**{chr(code): chr(code + 32) for code in range(ord("A"), ord("Z") + 1)},
+                           "\u0130": "i", "\u0131": "i", "\u017f": "s", "\u212a": "k"})
+# str.lower() folds A-Z and the Kelvin sign alike and maps every other character to one non-ASCII character,
+# which the ASCII-only rules never match. Only these three differ: dotted capital I lowers to two characters,
+# dotless i and long s stay as they are.
+LOWER_DIFFERS = ("\u0130", "\u0131", "\u017f")
+
+
+def fold_case(text: str) -> str:
+    """Text the lower-case rules match at the original spans, as CASE_FOLD folds it.
+
+    On text with any non-ASCII character, str.translate takes about 75 ms per MB and str.lower() about 5 ms.
+    """
+    if any(char in text for char in LOWER_DIFFERS):
+        return text.translate(CASE_FOLD)
+    return text.lower()
+
+
+def script_imports(page: Page, scope) -> list[str]:
+    """The in-scope modules a script that loaded (JavaScript, 2xx) imports, in order of appearance."""
+    content_type = page.content_type
+    is_script = "javascript" in content_type or "ecmascript" in content_type or (
+        not content_type and urlsplit(page.url).path.endswith((".js", ".mjs")))
+    if not is_script or not 200 <= page.status < 300:
+        return []
+    return [url for specifier in module_imports(page.text) if (url := resolve_reference(page.url, specifier, scope))]
+
 
 class ScanerCredentials:
-    def __init__(self, max_concurrent_requests: int = 25, batch_size: int = 50) -> None:
+    def __init__(self, max_concurrent_requests: int = 25, window_size: int = 50, scope=(),
+                 host_connections: int | None = None) -> None:
         # Base credential pattern (your existing patterns)
         base_pattern = (
             # "h4x0r-dz" patterns
             r"access_key|access_token|admin_pass|admin_user|algolia_admin_key|algolia_api_key|"
             r"alias_pass|alicloud_access_key|amazon_secret_access_key|amazonaws|ansible_vault_password|"
             r"aos_key|api_key|api_key_secret|api_key_sid|api_secret|api\.googlemaps AIza|apidocs|"
-            r"apikey|apiSecret|app_debug|app_id|app_key|app_log_level|app_secret|appkey|appkeysecret|"
+            r"apikey|apiSecret|app_id|app_key|app_secret|appkey|appkeysecret|"
             r"application_key|appsecret|appspot|auth_token|authorizationToken|authsecret|aws_access|"
             r"aws_access_key_id|aws_bucket|aws_key|aws_secret|aws_secret_key|aws_token|AWSSecretKey|"
             r"b2_app_key|bashrc password|bintray_apikey|bintray_gpg_password|bintray_key|bintraykey|"
@@ -70,115 +101,105 @@ class ScanerCredentials:
             r"private_key|public_key|ssl_key|ssh_key|gpg_key|certificate"
         )
 
-        # Construct the full pattern
-        self.credential_pattern = (
-            r"((" + base_pattern + r")[a-z0-9_ .\-,]{0,25})" +  # Key names and separators
-            r"(=|>|:=|\|\|:|<=|=>|:|->|\+=|\-=|\*=|\/=|%=|\^=|&=|\|=|==|\+=|<<=|>>=|=>|\?=|\?\?=)" +  # Operators
+        assignment = (
+            # Rest of the key name and separators. No comma: it would run into the next property's value.
+            r")[a-z0-9_ .\-]{0,25}" +
+            r"(?:=|>|:=|\|\|:|<=|=>|:|->|\+=|\-=|\*=|\/=|%=|\^=|&=|\|=|==|\+=|<<=|>>=|=>|\?=|\?\?=)" +  # Operators
             r"\s*" +  # Optional whitespace
-            r"['\"]([0-9a-zA-Z\-_=+/]{8,128})['\"]"  # Value pattern
+            r"(?P<quote>['\"])" +
+            # Fetch API option credentials: "same-origin" and CORS mode "use-credentials", not secrets
+            r"(?!(?:same-origin|use-credentials)(?P=quote))" +
+            r"(?P<value>[0-9a-zA-Z\-_=+/]{8,128})(?P=quote)"
         )
+        # The rule as written, matched case-insensitively (tests/measure_rules.py reads it).
+        self.credential_pattern = r"(?P<label>" + base_pattern + assignment
+        # The same rule for _findings: lower-case field names, matched against a CASE_FOLD copy of the text.
+        # With IGNORECASE, re tries every field name at every position (about 1.5 s per MB of script, which
+        # blocks the worker's event loop); case-sensitive, it skips positions by their first letter.
+        self._assignment = re.compile(r"(?P<label>" + base_pattern.lower() + assignment, re.MULTILINE)
 
         # Add additional specific patterns for special cases
         self.additional_patterns = {
-            'jwt': r'eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*',
-            'private_key': r'-----BEGIN (?:RSA )?PRIVATE KEY-----[A-Za-z0-9\s/+=]+-----END (?:RSA )?PRIVATE KEY-----',
-            'aws_keys': r'AKIA[0-9A-Z]{16}'
+            # A JWS or JWE header always names its algorithm. Depending on its byte offset modulo 3, the key "alg":
+            # encodes as ImFsZyI6, JhbGciO or iYWxnIj; as the first key it starts the header as eyJhbGciO. Other
+            # base64 JSON, such as a signed {"v":"1"} link parameter that filled a production report, is not a JWT.
+            # The literal eyJ comes first, so the lookahead runs only where a header starts, not at every
+            # position of a long base64 run.
+            'jwt': r'eyJ(?=hbGciO|[A-Za-z0-9_-]*?(?:ImFsZyI6|JhbGciO|iYWxnIj))[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*',
+            'private_key': (r'-----BEGIN (?P<kind>(?:RSA )?PRIVATE KEY)-----'
+                            r'[A-Za-z0-9\s/+=]+-----END (?P=kind)-----'),
+            # Not the key ID of a presigned S3 URL, plain or URL-encoded: such a URL is made to be handed out.
+            'aws_keys': r'(?<!X-Amz-Credential=)(?<!X-Amz-Credential%3D)(?<!X-Amz-Credential%3d)AKIA[0-9A-Z]{16}'
         }
 
         self.max_concurrent_requests = max_concurrent_requests
-        self.batch_size = batch_size
+        self.host_connections = host_connections or max_concurrent_requests  # this worker's share
+        self.window_size = window_size  # requests in flight per worker process
         self.rate_limiter = AsyncLimiter(max_concurrent_requests, 1)
+        self.pacer = HostPacer(rate=max_concurrent_requests, connections=self.host_connections)  # per host: pacing, 429/503 backoff, request slots
+        self.cancellation_manager = AsyncCancellationManager()
+        self.scope = tuple(scope)
+        self.outcomes: Counter = Counter()
+        self.imports: set[tuple[str, str]] = set()  # (origin page, module URL) imported by the scripts read here
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=(
-            retry_if_exception_type(ClientResponseError) |
-            retry_if_exception_type(asyncio.TimeoutError) |
-            retry_if_exception_type(ServerConnectionError) |
-            retry_if_exception_type(ClientPayloadError)
-        )
-    )
+    def _collect_imports(self, origin_url: str, page: Page) -> None:
+        """Remember the in-scope modules a script that loaded imports; the CLI fetches them in a later round."""
+        self.imports.update((origin_url, url) for url in script_imports(page, self.scope))
+
+    def _findings(self, data: str) -> list[tuple[str, str]]:
+        labels_by_span: dict[tuple[int, int], list[str]] = {}
+        for match in self._assignment.finditer(fold_case(data)):
+            labels_by_span[match.span("value")] = [data[slice(*match.span("label"))].lower()]
+        for pattern_name, pattern in self.additional_patterns.items():
+            for match in re.finditer(pattern, data):
+                labels = labels_by_span.setdefault(match.span(), [])
+                if pattern_name not in labels:
+                    labels.append(pattern_name)
+        # The report redacts values, so each further occurrence of a value would only add an identical row.
+        distinct = {(" + ".join(labels), data[slice(*span)]): None for span, labels in labels_by_span.items()}
+        return [(label, "[REDACTED]") for label, _ in distinct]
+
     async def _get_request(self, url_tuple: tuple[str, str], header, session: aiohttp.ClientSession) -> Union[None, tuple[str, str, list[tuple]]]:
         origin_url, script_url = url_tuple
-        try:
-            async with self.rate_limiter:
-                async with session.get(script_url, headers=header, allow_redirects=True, max_redirects=5) as response:
-                    data = await response.text('utf-8', 'ignore')
-
-                    if not data:
-                        return None
-
-                    leaked_global = re.findall(self.credential_pattern, data, flags=re.IGNORECASE | re.MULTILINE)
-
-                    for pattern_name, pattern in self.additional_patterns.items():
-                        additional_matches = re.findall(pattern, data)
-                        for match in additional_matches:
-                            leaked_global.append((pattern_name, match))
-
-                    if not leaked_global:
-                        return None
-
-                    leaked_global = [(item[-3].lower(), item[-1]) if len(item) >= 3 else (item[-2].lower(), item[-1]) for item in leaked_global]
-
-                    return origin_url, script_url, leaked_global
-
-        except (ClientResponseError, asyncio.TimeoutError, ServerConnectionError, ClientPayloadError):
-            raise
-
-        except (ClientConnectionError, ClientOSError, ClientConnectorError, ClientProxyConnectionError):
+        # Matching another resource can block this worker's loop past sock_connect and turn a connection that
+        # succeeded into a connect timeout, so retry once (a dead host costs one more connect timeout).
+        page = await fetch_text(session, script_url, header, scope=self.scope, limiter=self.rate_limiter,
+                                pacer=self.pacer, outcomes=self.outcomes, connect_retries=1)
+        if page is None or not page.text:
             return None
-
-        except Exception as e:
-            logger.error(f"Unexpected error for {script_url}: {str(e)}")
-            return None
-
-    async def _fetch_credentials(self, network_files_batch: list[tuple[str, str]], header, session: aiohttp.ClientSession):
-        tasks = [self._get_request(url_tuple, header, session) for url_tuple in network_files_batch]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return [r for r in results if isinstance(r, tuple)]
+        self._collect_imports(origin_url, page)
+        if findings := self._findings(page.text):
+            return report_origin(origin_url), report_origin(page.url), findings
+        return None
 
     async def process_credentials(self, network_files: list[tuple[str, str]]):
-        FG, BT, FR, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Style.RESET_ALL
-        connector = aiohttp.TCPConnector(
-            ssl=False,
-            limit_per_host=self.max_concurrent_requests,
+        connector = PublicDestinationConnector(
+            limit_per_host=self.host_connections,
             force_close=False,
             keepalive_timeout=300,
             enable_cleanup_closed=True,
             ttl_dns_cache=600
         )
         timeout = aiohttp.ClientTimeout(total=45, sock_read=30, sock_connect=5)
-        header = utils.get_header()
+        header = get_header()
 
         all_results = []
-        total_batches = (len(network_files) + self.batch_size - 1) // self.batch_size
-
         try:
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                for batch_num, i in enumerate(range(0, len(network_files), self.batch_size), 1):
-                    batch = network_files[i:i + self.batch_size]
-                    try:
-                        logger.info(FR + f"Starting Batch {batch_num}/{total_batches}: {len(batch)} Network Urls" + S)
-                        results = await self._fetch_credentials(batch, header, session)
-                        all_results.extend(results)
-                        logger.info(FR + f"Finished Batch {batch_num}/{total_batches}: {len(batch)} Network Urls" + S)
-                        if batch_num % 10 == 0:  # Every 10 batches (500 Subdomains with 50 batch_size)
-                            pause_time = min(len(batch) / 100, 3)
-                            await asyncio.sleep(pause_time)  # pause dynamically to prevent overwhelming
-
-                    except Exception as e:
-                        logger.error(f"Batch {batch_num} failed: {str(e)}")
-                        continue
+            async with website_session(connector, timeout) as session:
+                results = await self.cancellation_manager.run_window(
+                    network_files, lambda url_tuple: self._get_request(url_tuple, header, session), self.window_size)
+                all_results = [result for result in results if isinstance(result, tuple)]
 
         except (asyncio.CancelledError, KeyboardInterrupt):
-            logger.info("\nOperation cancelled, cleaning up...")
+            logger.info("Operation cancelled, cleaning up...")
+            await self.cancellation_manager.cancel_all()
+        finally:
+            await connector.close()
 
         return all_results
 
-    @staticmethod
-    async def get_results(network_files: list[tuple[str, str]]) -> list[tuple]:
+    async def get_results(self, network_files: list[tuple[str, str]]) -> tuple[list[tuple], dict[str, int], list[tuple[str, str]]]:
+        """Redacted candidates per resource, the request outcome counts, and the modules the scripts import."""
         logging.basicConfig(level=logging.INFO, format='%(message)s')
-        scraper = ScanerCredentials()
-        results = await scraper.process_credentials(network_files=network_files)
-        return results
+        results = await self.process_credentials(network_files=network_files)
+        return results, dict(self.outcomes), sorted(self.imports)

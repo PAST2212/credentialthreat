@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 
-import random
 import re
 import logging
+from collections import deque
+from urllib.parse import urlsplit
 from typing import Union
 import asyncio
 import multiprocessing
 import psutil
 import sys
 from colorama import Fore, Style
-import tldextract
-from credentialthreat.core.credentialsearch import ScanerCredentials
-from credentialthreat.core.networksearch import ScanerNetworkResources
 from credentialthreat.core.networksearch import ScrapNetworkUrls
+from credentialthreat.core.fetch import get_header  # noqa: F401  (used by recon modules)
 
 
 def get_workers() -> int:
@@ -23,184 +22,85 @@ def get_workers() -> int:
     return int(worker)
 
 
-def get_header() -> dict:
-    user_agents = [
-        'Mozilla/5.0 (Linux; Android 10; LM-Q730) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.138 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.84 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 11; SM-A115F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.121 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 12; M2101K7AG) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 9; INE-LX2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 6.3; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.150 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 10; CPH2179) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35',
-        'Mozilla/5.0 (Linux; Android 12; motorola edge 5G UW (2021)) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 9; SM-J530F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.82 Safari/537.36',
-        'Mozilla/5.0 (Android 10; Mobile; rv:109.0) Gecko/113.0 Firefox/113.0',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.54 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.106 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 10; CPH1819) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 11; A509DL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 11; SM-A207M) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 12; SM-M515F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.41 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.80 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.82 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 10; HRY-LX1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (Linux; Android 11; moto g pure) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35',
-        'Mozilla/5.0 (Linux; Android 10; CPH1931) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.108 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.116 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.122 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 10; Infinix X656) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.13; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.89 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 11; SM-A207F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.150 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 10; JSN-L21) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 12; SM-S127DL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.125 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.117 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 6.3; Win64; x64; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (Linux; Android 12; SM-A135U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.25 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 6.2; Win64; x64; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (Linux; Android 12; FNE-NX9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Android 11; Mobile; rv:109.0) Gecko/113.0 Firefox/113.0',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.100 Safari/537.36',
-        'Mozilla/5.0 (Android 12; Mobile; rv:109.0) Gecko/113.0 Firefox/113.0',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.72 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 6.3; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35',
-        'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35',
-        'Mozilla/5.0 (Linux; Android 10; SM-N960F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 10; Lenovo TB-8505F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 12; SM-A115F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 10; M2004J19C) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 13; SM-A536E) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 10; ELE-L29) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Linux; Android 10; COL-L29) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Mobile Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.121 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 6.3; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (Android 13; Mobile; rv:109.0) Gecko/113.0 Firefox/113.0',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.103 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 6.1; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:109.0) Gecko/20100101 Firefox/113.0'
-    ]
-
-    headers = {
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Accept-Encoding': 'gzip, deflate',
-        'User-Agent': random.choice(user_agents)
-    }
-
-    return headers
-
-
 # Function to configure cross-platform settings
 def configure_platform_settings():
     if sys.platform.startswith('win'):
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        # The native proactor wakes its I/O wait when the main thread receives a signal.
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
         multiprocessing.set_start_method('spawn', force=True)
     else:
         multiprocessing.set_start_method('fork', force=True)
 
 
-def deduplicate_script_urls(whitelist: list[ScrapNetworkUrls], blacklist: list[str]) -> list[tuple[str, str]]:
-    """Deduplicate network URLs, keeping only unique script URLs."""
+def deduplicate_script_urls(whitelist: list[ScrapNetworkUrls], blacklist: set[str]) -> list[tuple[str, str]]:
+    """Deduplicate network URLs, keeping only unique script URLs that are not in the blacklist.
+
+    A script that several pages reference keeps the smallest origin URL, so the report names the same page on every
+    run whichever page finished first.
+    """
     network_files_dict = {}
     for item in whitelist:
         # Use script_url as key and origin_url as value
-        network_files_dict[item.script_url] = item.origin_url
+        if item.script_url not in network_files_dict or item.origin_url < network_files_dict[item.script_url]:
+            network_files_dict[item.script_url] = item.origin_url
 
     new_network_files = [(value, key) for key, value in network_files_dict.items() if key not in blacklist]
 
     return list(filter(None, new_network_files))
 
 
-def remove_byte_content_urls(internal_urls):
-    pattern_bytes_files = re.compile(
-            r"(?=:\s)?(?:https?://)?[./]*[\w/.]+'\.(?:jpg|png|gif|jpeg|bmp|webp|woff2|"
-            r"woff|ico|svg|mp3|mp4|mpeg|mpg|avi|zip|rar|tar|gz|pdf|ttf|exe|xml|app)",
-            re.IGNORECASE
-        )
-    matches_temp: set = set()
-
-    for domain in internal_urls:
-        if domain.startswith('https://') or domain.startswith('http://'):
-            url = domain
-        else:
-            url = 'https://' + domain
-
-        if pattern_bytes_files.search(url) is None:
-            matches_temp.add(url)
-
-    matches = list(matches_temp)
-    return matches
+HOST_CONNECTIONS = 25  # parallel connections one host may see from the whole scan
 
 
-def calculate_optimal_chunk_size(sample_urls: Union[list[str], list[tuple[str, str]]], min_size: int = 1000, max_size: int = 10000, memory_safety_factor: float = 0.5, domains_input: Union[list[str]] = None, tld_extract: Union[None, tldextract.tldextract.TLDExtract] = None) -> int:
-    FG, BT, FR, FY, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Fore.YELLOW, Style.RESET_ALL
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
-    try:
-        logging.info(FY + "Calculating optimal chunk size..." + S)
-        # Get initial memory usage
-        initial_memory = psutil.Process().memory_info().rss
+def host_connections_per_worker(workers: int) -> int:
+    """Each worker's share of the per-host connection budget.
 
-        if all(isinstance(url, tuple) for url in sample_urls):
-            # Create a sample scraper and process a small batch to measure memory usage
-            scraper = ScanerCredentials()
+    Every worker works on every host at the same time, so without a shared budget the load on a
+    host would grow with the number of CPU cores.
+    """
+    return max(2, HOST_CONNECTIONS // max(1, workers))
 
-            # Run sample and measure memory
-            asyncio.run(scraper.process_credentials(network_files=sample_urls))
 
-        elif domains_input:
-            # Create a sample scraper and process a small batch to measure memory usage
-            scraper = ScanerNetworkResources()
+def plan_chunks(items: list, workers: int) -> list[list]:
+    """Deal items round-robin into one chunk per worker (fewer when there are fewer items).
 
-            # Run sample and measure memory
-            asyncio.run(scraper.process_network_sources(network_points=sample_urls, domains_input=domains_input, tld_extract=tld_extract))
+    A chunk only finishes with its slowest request, so each additional chunk per worker would add
+    a stretch with few requests in flight. Dealing instead of slicing mixes the hosts of a sorted
+    list into every chunk, which keeps the chunks similar in duration. Within a chunk the hosts take
+    turns, so one host with many items does not hold the others back.
+    Peak memory depends on the requests in flight per worker, not on the chunk size.
+    """
+    items = list(items)
+    count = min(len(items), max(1, workers))
+    return [interleave_by_host(items[index::count]) for index in range(count)]
 
-        # Calculate memory used per URL
-        final_memory = psutil.Process().memory_info().rss
-        memory_per_url = (final_memory - initial_memory) / len(sample_urls)
 
-        # Get available memory
-        available_memory = psutil.virtual_memory().available
+def _request_host(item) -> str:
+    """The host an item is requested from: a host name, a URL, or the resource URL of an (origin, resource) pair."""
+    value = item[1] if isinstance(item, tuple) else item
+    if not isinstance(value, str):
+        return ""
+    return (urlsplit(value).hostname or "") if "://" in value else value
 
-        # Calculate optimal size using safety factor
-        safe_memory = available_memory * memory_safety_factor
-        optimal_size = int(safe_memory / memory_per_url)
 
-        # Clamp result between min and max
-        chunk_size = max(min_size, min(optimal_size, max_size))
+def interleave_by_host(items: list) -> list:
+    """The items in turns by host, each host's items in their original order.
 
-        return chunk_size
-
-    except Exception as e:
-        logging.error(f"Error calculating optimal chunk size: {e}")
-        return min_size
+    A worker keeps `window_size` requests in flight but only its share of connections per host. In a sorted list
+    one host's items are contiguous, so a host with many items filled the whole window with requests waiting for
+    that host, and the other hosts waited behind them.
+    """
+    groups: dict[str, deque] = {}
+    for item in items:
+        groups.setdefault(_request_host(item), deque()).append(item)
+    turns = deque(groups.values())
+    result = []
+    while turns:
+        group = turns.popleft()
+        result.append(group.popleft())
+        if group:
+            turns.append(group)
+    return result
 
 
 class UrlPrioritizer:
@@ -287,7 +187,7 @@ class UrlPrioritizer:
             r'k8s', r'kubernetes', r'istio', r'consul',
             r'terraform', r'pulumi', r'cloudformation',
             r'eks', r'aks', r'gke', r'openshift',
-            r'cluster', r'namespace', r'pod', r'deployment'
+            r'cluster', r'namespace', r'pod', r'deployment',
 
             # Common Services
             r'elasticsearch', r'kibana', r'grafana', r'prometheus',
@@ -420,7 +320,28 @@ class UrlPrioritizer:
 
         return {'internal_pattern': internal_patterns}
 
-    def prioritize_urls(self, urls: Union[list[tuple[str, str]], list[str]], limit: int) -> Union[list[tuple[str, str]], list[str]]:
+    @staticmethod
+    def _matcher(patterns: list[str]) -> re.Pattern:
+        return re.compile("|".join(f"(?:{pattern})" for pattern in patterns), re.IGNORECASE)
+
+    @staticmethod
+    def _match_target(url: str, scope=()) -> str:
+        """The URL without query string or fragment, and without the configured domain in its host name.
+
+        The configured domain is in every URL of a scan, so a pattern it contains (`key` in keystone.example, `acl`
+        in miracle.example) would rank every URL high and leave a URL limit to the alphabet.
+        """
+        target = url.split("#", 1)[0].split("?", 1)[0]
+        scheme, separator, rest = target.partition("://")
+        authority, slash, path = rest.partition("/")
+        host, colon, port = authority.partition(":")
+        for root in sorted(scope, key=len, reverse=True):
+            if root and (host == root or host.endswith("." + root)):
+                host = host[:-len(root)]
+                break
+        return f"{scheme}{separator}{host}{colon}{port}{slash}{path}"
+
+    def prioritize_urls(self, urls: Union[list[tuple[str, str]], list[str]], limit: int, scope=()) -> Union[list[tuple[str, str]], list[str]]:
         """Prioritize network and internal URLs based on likelihood of credential exposure."""
 
         FG, BT, FR, FY, S = Fore.GREEN, Style.BRIGHT, Fore.RED, Fore.YELLOW, Style.RESET_ALL
@@ -429,10 +350,17 @@ class UrlPrioritizer:
             return []
 
         script_patterns = self._get_critical_script_url_patterns()
-        internal_patterns = self.get_internal_url_patterns()['internal_pattern']
+        # The pattern lists are regular expressions (e.g. r'\.js$', r'dev\.'); match them as such,
+        # against the URL without query string or fragment.
+        internal_match = self._matcher(self.get_internal_url_patterns()['internal_pattern'])
+        high_match = self._matcher(script_patterns['high_priority'])
+        medium_match = self._matcher(script_patterns['medium_priority'])
 
         is_internal = isinstance(urls[0], str)
         url_type = "Internal" if is_internal else "Network"
+        # Sorting makes the selection under a limit independent of discovery order. Resources sort by their own URL:
+        # which page a shared resource is credited to depends on which page finished first.
+        urls = sorted(urls) if is_internal else sorted(urls, key=lambda pair: (pair[1], pair[0]))
 
         seen_urls = set()
         high_priority = []
@@ -447,8 +375,7 @@ class UrlPrioritizer:
                 if url in seen_urls:
                     continue
                 seen_urls.add(url)
-                url_lower = url.lower()
-                if any(pattern in url_lower for pattern in internal_patterns):
+                if internal_match.search(self._match_target(url, scope)):
                     high_priority.append(url)
                 else:
                     low_priority.append(url)
@@ -459,10 +386,10 @@ class UrlPrioritizer:
                 if script_url in seen_urls:
                     continue
                 seen_urls.add(script_url)
-                script_url_lower = script_url.lower()
-                if any(pattern in script_url_lower for pattern in script_patterns['high_priority']):
+                target = self._match_target(script_url, scope)
+                if high_match.search(target):
                     high_priority.append(url_obj)
-                elif any(pattern in script_url_lower for pattern in script_patterns['medium_priority']):
+                elif medium_match.search(target):
                     medium_priority.append(url_obj)
                 else:
                     low_priority.append(url_obj)
@@ -485,22 +412,13 @@ class UrlPrioritizer:
             logging.info(FY + f"\nFinal Selection:"
                               f"\n└── Using {limit:,} high priority URLs only (limit reached)" + S)
         else:
-            result = high_priority
+            # New lists, so that the counts below are those of the selection, not of the input.
             remaining = limit - high_count
+            medium = medium_priority[:remaining]
+            low = low_priority[:remaining - len(medium)]
+            result = high_priority + medium + low
 
-            if not is_internal and remaining > 0 and medium_priority:
-                med_used = min(remaining, med_count)
-                result.extend(medium_priority[:med_used])
-                remaining -= med_used
-
-            if remaining > 0 and low_priority:
-                low_used = min(remaining, low_count)
-                result.extend(low_priority[:low_used])
-
-            # Log final distribution
-            final_high = len(high_priority)
-            final_med = len(medium_priority[:limit - high_count]) if not is_internal else 0
-            final_low = min(limit - len(result) + final_med, low_count)
+            final_high, final_med, final_low = high_count, len(medium), len(low)
 
             logging.info(FY + f"\nFinal Selection:"
                               f"\n├── Selected URLs: {len(result):,}"

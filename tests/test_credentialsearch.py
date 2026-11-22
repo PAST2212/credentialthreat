@@ -1,0 +1,331 @@
+import asyncio
+import re
+import time
+import unittest
+from unittest.mock import MagicMock, Mock, patch
+
+import aiohttp
+
+from credentialthreat.core.credentialsearch import ScanerCredentials
+from credentialthreat.core.fetch import HostPacer
+from credentialthreat.core.internallinksearch import ScanerInternalLinks
+from credentialthreat.core.networksearch import ScanerNetworkResources
+from http_doubles import FakeClock, response, session_returning
+
+
+SITE = "https://docs.example.com"
+
+
+class ThrottledResourceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_throttled_resource_is_scanned_after_retry(self):
+        session = session_returning(response(429, "Too Many Requests", {"Retry-After": "1"}),
+                                    response(200, 'api_key = "FIXTUREONLYVALUE";'))
+        scanner = ScanerCredentials(scope=["example.com"])
+        clock = FakeClock()
+        scanner.pacer = HostPacer(clock=clock.now, sleep=clock.sleep)
+        result = await scanner._get_request((SITE, SITE + "/app.js"), {}, session)
+        self.assertEqual(result, (SITE, SITE, [("api_key", "[REDACTED]")]))
+        self.assertEqual(dict(scanner.outcomes), {"ok": 1})
+
+    async def test_resource_that_stays_throttled_is_counted_as_skipped(self):
+        session = session_returning(*[response(429, 'api_key = "NOTCONTENTFIXTURE";') for _ in range(3)])
+        scanner = ScanerCredentials(scope=["example.com"])
+        clock = FakeClock()
+        scanner.pacer = HostPacer(clock=clock.now, sleep=clock.sleep)
+        self.assertIsNone(await scanner._get_request((SITE, SITE + "/app.js"), {}, session))
+        self.assertEqual(dict(scanner.outcomes), {"HTTP 429": 1})
+
+
+def case_insensitive_findings(scanner, data):
+    """The matcher's previous implementation: the assignment rule run with IGNORECASE on the raw text."""
+    labels_by_span = {}
+    for match in re.finditer(scanner.credential_pattern, data, flags=re.IGNORECASE | re.MULTILINE):
+        labels_by_span[match.span("value")] = [match["label"].lower()]
+    for pattern_name, pattern in scanner.additional_patterns.items():
+        for match in re.finditer(pattern, data):
+            labels = labels_by_span.setdefault(match.span(), [])
+            if pattern_name not in labels:
+                labels.append(pattern_name)
+    return [(" + ".join(labels), "[REDACTED]") for labels in labels_by_span.values()]
+
+
+def minified_script(size):
+    """Deterministic JavaScript-like text without credentials, as large bundles look to the matcher."""
+    parts, index = [], 0
+    while sum(map(len, parts)) < size:
+        parts.append(f'function f{index}(e,t){{return e.data{index}?t.render("Item{index}",{{id:e.id,label:"Label {index}"}}):null}};')
+        index += 1
+    return "".join(parts)
+
+
+class MatcherTests(unittest.TestCase):
+    def test_field_names_match_in_any_case_like_before(self):
+        scanner = ScanerCredentials()
+        samples = [
+            'API_KEY = "FIXTUREONLYVALUE1"', 'Client_Secret: \'FIXTUREONLYVALUE2\'', 'apisecret => "FIXTUREONLYVALUE3"',
+            'AWSSECRETKEY="FIXTUREONLYVALUE4" and awssecretkey="FIXTUREONLYVALUE5"',
+            # Non-ASCII letters that Unicode case-insensitive matching folds onto ASCII ones.
+            'acce\u017fs_key = "FIXTUREONLYVALUE6"', 'ap\u0130_key = "FIXTUREONLYVALUE7"', 'ap\u0131_key = "FIXTUREONLYVALUE8"',
+            'api_\u212aey = "FIXTUREONLYVALUE9"', 'api_key = "FIXTURE\u212aONLY\u017fVALUE"',
+            '\u00dcbersicht api_key = "FIXTUREONLYVALUE10" ' + "x" * 50 + ' AKIA' + 'TEST' * 4,
+        ]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), case_insensitive_findings(scanner, sample))
+                self.assertTrue(scanner._findings(sample))
+
+    def test_every_character_that_folds_differently_matches_like_before(self):
+        # str.lower() folds like CASE_FOLD except for three characters: dotted capital I lowers to two
+        # characters, dotless i and long s stay unchanged. The Kelvin sign and other letters lower alike.
+        scanner = ScanerCredentials()
+        templates = ('{c} api_key = "FIXTUREONLYVALUE1"', 'api_key = "FIXTUREONLYVALUE1" {c}',
+                     'api_key = "FIXTURE{c}ONLYVALUE"', 'ap{c}_key = "FIXTUREONLYVALUE2" acce{c}s_key = "FIXTUREONLYVALUE3"',
+                     'Ä {c} api_key = "FIXTUREONLYVALUE4" api_Key = "FIXTUREONLYVALUE5"')
+        for char in ("İ", "ı", "ſ", "K", "Ä", "ä", "ß", "\U0001f600", "I", "S"):
+            for template in templates:
+                sample = template.format(c=char)
+                with self.subTest(sample=ascii(sample)):
+                    self.assertEqual(scanner._findings(sample), case_insensitive_findings(scanner, sample))
+
+    def test_non_ascii_text_costs_little_more_to_match_than_ascii_text(self):
+        # Pages are mostly non-ASCII, where translating with CASE_FOLD cost about 0.08 s per MB, a third of
+        # the matching. Alternate the runs and keep the fastest of each, so a busy machine slows both alike.
+        scanner = ScanerCredentials()
+        ascii_text = minified_script(1_000_000)
+        non_ascii_text = ascii_text[:-1] + "ä"
+
+        def timed(text):
+            start = time.perf_counter()
+            scanner._findings(text)
+            return time.perf_counter() - start
+
+        ascii_times, non_ascii_times = [], []
+        for _ in range(5):
+            ascii_times.append(timed(ascii_text))
+            non_ascii_times.append(timed(non_ascii_text))
+        self.assertLess(min(non_ascii_times), min(ascii_times) * 1.2,
+                        f"non-ASCII {min(non_ascii_times):.3f}s, ASCII {min(ascii_times):.3f}s")
+
+    def test_cors_credentials_keyword_is_not_a_candidate(self):
+        # `use-credentials` is the CORS mode of crossorigin attributes; one production script assigned it to withCredentials.
+        scanner = ScanerCredentials()
+        for sample in ('e.withCredentials="use-credentials"', "credentials: 'use-credentials'", 'CREDENTIALS = "USE-CREDENTIALS"'):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [])
+                self.assertEqual(case_insensitive_findings(scanner, sample), [])
+        self.assertEqual(scanner._findings('credentials = "use-credentials-FIXTURE"'), [("credentials", "[REDACTED]")])
+
+    def test_access_key_id_of_a_presigned_url_is_not_a_candidate(self):
+        # A presigned S3 URL is made to be handed out, and carries its key ID in X-Amz-Credential. On one
+        # production site such IDs made two of every three report rows.
+        scanner = ScanerCredentials()
+        key_id = "AKIA" + "TEST" * 4
+        for sample in (f"a.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&amp;amp;X-Amz-Credential={key_id}%2F20260101%2Fs3",
+                       f"proxy?url=https%3A%2F%2Fb.example%2Fa.png%3FX-Amz-Credential%3D{key_id}%252F20260101"):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [])
+        for sample, label in ((f"<span>{key_id}</span>", "aws_keys"),
+                              (f'aws_access_key_id = "{key_id}"', "aws_access + aws_keys"),
+                              (f"Authorization: AWS4-HMAC-SHA256 Credential={key_id}/20260101/s3", "aws_keys")):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [(label, "[REDACTED]")])
+
+    def test_fetch_credentials_mode_is_not_a_candidate(self):
+        # The Fetch API option credentials: "same-origin" was every match on one production site.
+        scanner = ScanerCredentials()
+        for sample in ('fetch(u,{mode:"cors",credentials:"same-origin"})', "credentials: 'same-origin'",
+                       'o.credentials="omit":o.credentials="same-origin"', 'CREDENTIALS = "SAME-ORIGIN"'):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [])
+                self.assertEqual(case_insensitive_findings(scanner, sample), [])
+        self.assertEqual(scanner._findings('credentials = "same-origin-FIXTUREONLY"'), [("credentials", "[REDACTED]")])
+
+    def test_assignment_does_not_run_into_the_next_property(self):
+        # On one production site, `withCredentials:this.withCredentials,requestType:"…"` was a credentials candidate:
+        # the separator after the field name ran across the comma into the next property's value.
+        scanner = ScanerCredentials()
+        for sample in ('x={withCredentials:this.withCredentials,requestType:"arraybuffer"}',
+                       'e.withCredentials=t.withCredentials,e.responseType="arraybuffer"',
+                       'init = { credentials: options.credentials, mode: "navigate-fixture" }'):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [])
+                self.assertEqual(case_insensitive_findings(scanner, sample), [])
+        for sample, label in (('config={credentials:"FIXTUREONLYVALUE"}', "credentials"),
+                              ('awsCredentials = "FIXTUREONLYVALUE"', "credentials"),
+                              ('api_key_prod = "FIXTUREONLYVALUE"', "api_key"),
+                              ('client_secret.value = "FIXTUREONLYVALUE"', "client_secret")):
+            with self.subTest(sample=sample):
+                self.assertEqual(scanner._findings(sample), [(label, "[REDACTED]")])
+
+    def test_a_value_repeated_in_one_text_is_reported_once(self):
+        # A production page carried one signed link parameter in 151 links. The report redacts values, so the
+        # 151 matches became 151 identical rows; a scan of 17,000 pages wrote 20,349 rows for a few values.
+        scanner = ScanerCredentials()
+        token = "eyJhbGciOiJGSVhUVVJFIn0.eyJ0ZXN0Ijp0cnVlfQ.RklYVFVSRQ"
+        links = "".join(f'<a href="/item/{n}?t={token}">item</a>' for n in range(151))
+        self.assertEqual(scanner._findings(links), [("jwt", "[REDACTED]")])
+        # Different values, or the same value under a different rule, stay separate.
+        other = token.replace("RklYVFVSRQ", "T1RIRVJGSVhUVVJF")
+        self.assertEqual(scanner._findings(links + f'<a href="/x?t={other}">x</a>'), [("jwt", "[REDACTED]")] * 2)
+        self.assertCountEqual(scanner._findings('api_key = "FIXTUREONLY123"; auth_token = "FIXTUREONLY123"; '
+                                                'api_key = "FIXTUREONLY123"'),
+                              [("api_key", "[REDACTED]"), ("auth_token", "[REDACTED]")])
+
+    def test_jwt_rule_requires_a_header_with_alg(self):
+        # A signed link parameter on a production site looked like a JWT: base64url JSON, then two dot-separated
+        # segments. Its header was {"v":"1"}; a JWS or JWE header always names its algorithm in "alg".
+        import base64
+
+        def segment(data: bytes) -> str:
+            return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+        payload, signature = segment(b'{"sub":"FIXTUREONLY"}'), segment(b"FIXTURESIGNATURE")
+        scanner = ScanerCredentials()
+        # "alg" at each byte offset modulo 3 encodes differently, so each alignment is checked.
+        for header in (b'{"alg":"FIXTURE"}', b'{"kid":"1","alg":"FIXTURE"}', b'{"kid":"12","alg":"FIXTURE"}',
+                       b'{"kid": "12", "alg": "FIXTURE"}', b'{"typ":"JWT","alg":"none"}'):
+            with self.subTest(header=header):
+                token = f"{segment(header)}.{payload}.{signature}"
+                self.assertEqual(scanner._findings(f'<a href="/x?t={token}">'), [("jwt", "[REDACTED]")])
+        for header in (b'{"v":"1"}', b'{"typ":"JWT"}', b'{"algorithm":"FIXTURE"}', b'{"kid":"alg"}'):
+            with self.subTest(header=header):
+                token = f"{segment(header)}.{payload}.{signature}"
+                self.assertEqual(scanner._findings(f'<a href="/x?dib={token}&dib_tag=se">'), [])
+
+    def test_long_base64_run_costs_no_more_to_match_than_ordinary_text(self):
+        # Pages embed images and fonts as base64. A rule that tries a lookahead at every position of such a run
+        # takes quadratic time: a 40 KB run blocked matching for 9.5 s. Keep the fastest of alternating runs.
+        import base64
+        import random
+
+        scanner = ScanerCredentials()
+        rng = random.Random(7)
+        blob = base64.urlsafe_b64encode(bytes(rng.getrandbits(8) for _ in range(30_000))).decode()
+        words = minified_script(300_000)
+        with_blob = words[:-len(blob)] + blob
+
+        def timed(text):
+            start = time.perf_counter()
+            scanner._findings(text)
+            return time.perf_counter() - start
+
+        plain_times, blob_times = [], []
+        for _ in range(3):
+            plain_times.append(timed(words))
+            blob_times.append(timed(with_blob))
+        self.assertLess(min(blob_times), min(plain_times) * 2 + 0.05,
+                        f"with base64 run {min(blob_times):.3f}s, without {min(plain_times):.3f}s")
+
+    def test_assignment_rule_does_not_scan_text_case_insensitively(self):
+        # Case-insensitive matching of the field-name alternation costs about 1.5 s per MB of script
+        # and blocks the worker's event loop meanwhile. Compare on this machine, not against a fixed time.
+        # The runs alternate and the fastest of each counts, so a busy machine slows both sides alike.
+        # The new matcher is about 7x faster; the test asks for 2x.
+        scanner = ScanerCredentials()
+        text = minified_script(120_000)
+
+        def timed(run):
+            start = time.perf_counter()
+            run()
+            return time.perf_counter() - start
+
+        previous, current = [], []
+        for _ in range(5):
+            previous.append(timed(lambda: case_insensitive_findings(scanner, text)))
+            current.append(timed(lambda: scanner._findings(text)))
+        self.assertLess(min(current), min(previous) / 2,
+                        f"_findings took {min(current):.3f}s, case-insensitive {min(previous):.3f}s")
+
+
+class HostPausePerWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_throttled_host_also_pauses_the_workers_next_request_to_it(self):
+        scanners = (
+            (ScanerCredentials(scope=["example.com"]), lambda url: (SITE, url)),
+            (ScanerNetworkResources(scope=["example.com"]), lambda url: url),
+            (ScanerInternalLinks(scope=["example.com"]), lambda url: url),
+        )
+        for scanner, argument in scanners:
+            with self.subTest(scanner=type(scanner).__name__):
+                clock = FakeClock()
+                scanner.pacer = HostPacer(rate=1000, clock=clock.now, sleep=clock.sleep)
+                replies = iter([response(429, "", {"Retry-After": "5"}) for _ in range(3)] + [response(200, "ok")])
+                sent_at = []
+
+                def get(url, **kwargs):
+                    sent_at.append(clock.now())
+                    manager = MagicMock()
+                    manager.__aenter__.return_value = next(replies)
+                    return manager
+
+                session = Mock(get=get)
+                with patch("asyncio.sleep", new=clock.sleep):
+                    self.assertIsNone(await scanner._get_request(argument(SITE + "/a.js"), {}, session))
+                    await scanner._get_request(argument(SITE + "/b.js"), {}, session)
+                self.assertGreaterEqual(sent_at[3] - sent_at[2], 5.0)
+
+
+class ModuleImportCollectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scripts_report_the_in_scope_modules_they_import(self):
+        script = ('import{a}from"./dep.js";import"https://cdn.other.test/x.js";'
+                  'import("/lazy.js");import"./pic.png";')
+        scanner = ScanerCredentials(scope=["example.com"])
+        session = session_returning(response(200, script, {"Content-Type": "application/javascript"}))
+        await scanner._get_request((SITE, SITE + "/js/app.js"), {}, session)
+        self.assertEqual(scanner.imports, {(SITE, SITE + "/js/dep.js"), (SITE, SITE + "/lazy.js")})
+
+    async def test_only_scripts_that_loaded_are_searched_for_imports(self):
+        for status, content_type in ((200, "text/css"), (200, "text/html"), (404, "application/javascript")):
+            with self.subTest(status=status, content_type=content_type):
+                scanner = ScanerCredentials(scope=["example.com"])
+                session = session_returning(response(status, 'import"./dep.js";', {"Content-Type": content_type}))
+                await scanner._get_request((SITE, SITE + "/style"), {}, session)
+                self.assertEqual(scanner.imports, set())
+
+
+class ConnectTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_page_and_resource_stages_retry_a_connect_timeout_once(self):
+        # Hosts in these stages have already answered; a connect timeout there is mostly a blocked loop.
+        # The link stage probes discovered hosts, where a connect timeout usually means a dead host.
+        scanners = (
+            (ScanerCredentials(scope=["example.com"]), lambda url: (SITE, url), 2),
+            (ScanerNetworkResources(scope=["example.com"]), lambda url: url, 2),
+            (ScanerInternalLinks(scope=["example.com"]), lambda url: url, 1),
+        )
+        for scanner, argument, requests in scanners:
+            with self.subTest(scanner=type(scanner).__name__):
+                session = session_returning(aiohttp.ConnectionTimeoutError(), response(200, "ok"))
+                await scanner._get_request(argument(SITE + "/a.js"), {}, session)
+                self.assertEqual(session.get.call_count, requests)
+
+
+class HostShareTests(unittest.IsolatedAsyncioTestCase):
+    async def test_worker_never_sends_more_than_its_host_share_at_once(self):
+        scanners = (
+            (ScanerCredentials(max_concurrent_requests=1000, host_connections=2), lambda url: (SITE, url)),
+            (ScanerNetworkResources(max_concurrent_requests=1000, host_connections=2), lambda url: url),
+            (ScanerInternalLinks(max_concurrent_requests=1000, host_connections=2), lambda url: url),
+        )
+        for scanner, argument in scanners:
+            with self.subTest(scanner=type(scanner).__name__):
+                active = peak = 0
+
+                def get(url, **kwargs):
+                    async def enter(*args):
+                        nonlocal active, peak
+                        active += 1
+                        peak = max(peak, active)
+                        await asyncio.sleep(0.05)
+                        active -= 1
+                        return response(200, "ok")
+                    manager = MagicMock()
+                    manager.__aenter__.side_effect = enter
+                    return manager
+
+                session = Mock(get=get)
+                urls = [argument(f"{SITE}/{index}.js") for index in range(8)]
+                await scanner.cancellation_manager.run_window(urls, lambda url: scanner._get_request(url, {}, session), 8)
+                self.assertEqual(peak, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

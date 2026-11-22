@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
 import asyncio
-import json
 import re
 import aiohttp
 from aiolimiter import AsyncLimiter
 from bs4 import BeautifulSoup
 from credentialthreat.core import utils
+from credentialthreat.core.diagnostics import log_discovery_error
 
 
 class ScanerSubdomainCenter:
@@ -25,14 +25,8 @@ class ScanerSubdomainCenter:
                         if subdomain != '':
                             self.results.add(subdomain.rstrip('.'))
 
-        except (asyncio.TimeoutError, TypeError, json.decoder.JSONDecodeError) as e:
-            print('Subdomain Scan error occurred in subdomain center: ', e)
-
-        except aiohttp.ClientConnectorError as e:
-            print('Server Connection Error via subdomain center Subdomain Scan: ', e)
-
         except Exception as e:
-            print('Other Error occured with subdomain center Subdomain Scan: ', e)
+            log_discovery_error("Subdomain Center request", e)
 
     async def tasks_subdomaincenter(self, fuzzy_results: list, session: aiohttp.ClientSession):
         rate_limit = AsyncLimiter(1, 10)

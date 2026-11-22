@@ -7,9 +7,12 @@ import math
 from dataclasses import dataclass
 from tqdm import tqdm
 import aiohttp
+from credentialthreat.core.discovery import QueryResult, combined_values, error_reason
+from credentialthreat.core.website import PublicDestinationConnector
+from credentialthreat.recon.anubisdb import ScanerAnubisDb
 from credentialthreat.recon.crtsh import ScanerCrtsh
+from credentialthreat.recon.otx import ScanerOtxUrls
 from credentialthreat.recon.rapiddns import ScanerRapidDns
-from credentialthreat.recon.threatcrowd import ScanerThreatCrowd
 
 
 @dataclass
@@ -28,14 +31,15 @@ SUBDOMAIN_SERVICES = {
         'scanner': ScanerRapidDns,
         'rate_limit': 10
     },
-    # 'certspotter': {
-    #     'scanner': ScanerCertSpotter,
-    #     'rate_limit': 15
-    # },
-    'threatcrowd': {
-        'scanner': ScanerThreatCrowd,
+    'anubisdb': {
+        'scanner': ScanerAnubisDb,
         'rate_limit': 10
-    }
+    },
+    # Page URLs instead of host names (QueryResult.kind "urls"); the CLI sends them to the page stage.
+    'otx': {
+        'scanner': ScanerOtxUrls,
+        'rate_limit': 10
+    },
 }
 
 
@@ -91,7 +95,7 @@ class SubdomainScanner:
     @property
     async def session(self):
         if self._session is None:
-            connector = aiohttp.TCPConnector(
+            connector = PublicDestinationConnector(
                 limit=50,
                 ttl_dns_cache=300,
                 enable_cleanup_closed=True
@@ -108,37 +112,13 @@ class SubdomainScanner:
 
     async def scan_with_rate_limit(self, scanner, iterables, service_name):
         await self.rate_limiters[service_name].acquire()
-        result = await scanner.get_results(iterables, await self.session)
+        result = await scanner.get_report(iterables, await self.session)
         if self.progress_bar:
             self.progress_bar.update(len(iterables))
             self.progress_bar.set_postfix({'service': service_name})
         return result
 
-        # for attempt in range(max_retries):
-        #     try:
-        #         result = await scanner.get_results(iterables, await self.session)
-        #         if self.progress_bar:
-        #             self.progress_bar.update(len(iterables))
-        #             self.progress_bar.set_postfix({
-        #                 'service': service_name,
-        #                 'attempt': attempt + 1 if attempt > 0 else ''
-        #             })
-        #         return result
-        #
-        #     except Exception as e:
-        #         if attempt < max_retries - 1:
-        #             wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
-        #             if self.progress_bar:
-        #                 self.progress_bar.set_postfix({
-        #                     'service': service_name,
-        #                     'status': f'retrying in {wait_time}s'
-        #                 })
-        #             await asyncio.sleep(wait_time)
-        #         else:
-        #             print(f"Final failure for {service_name} after {max_retries} attempts: {str(e)}")
-        #             return set()
-
-    async def tasks_subdomains(self, iterables: list) -> None:
+    async def tasks_subdomains(self, iterables: list) -> list[QueryResult]:
         scanner_pairs = [
             (name, config['scanner']())
             for name, config in SUBDOMAIN_SERVICES.items()
@@ -151,20 +131,15 @@ class SubdomainScanner:
         )
 
         try:
-            tasks = []
-            for current_service, scanner_instance in scanner_pairs:
-                task = self.scan_with_rate_limit(
-                    scanner_instance,
-                    iterables,
-                    current_service
-                )
-                tasks.append(task)
+            async def service_report(service, scanner):
+                try:
+                    return await self.scan_with_rate_limit(scanner, iterables, service)
+                except Exception as exc:
+                    reason = error_reason(f"Subdomain discovery ({scanner.name})", exc)
+                    return [QueryResult(scanner.name, domain, None, reason=reason) for domain in iterables]
 
-            scan_results = await asyncio.gather(*tasks)
-            for result_set in scan_results:
-                self.subdomains.update(result_set)
-        except Exception as e:
-            print(f"Error during Subdomain scanning: {str(e)}")
+            reports = await asyncio.gather(*(service_report(name, scanner) for name, scanner in scanner_pairs))
+            return [query for report in reports for query in report]
         finally:
             if self.progress_bar:
                 self.progress_bar.close()
@@ -181,8 +156,10 @@ class SubdomainScanner:
 
         return best_case, worst_case
 
-    async def get_results(self, iterables: list) -> set:
+    async def get_report(self, iterables: list) -> list[QueryResult]:
         total_domains = len(iterables)
+        if not total_domains:
+            return []
         best_case, worst_case = self.calculate_time_range(total_domains)
 
         services = ', '.join(f"{name}" for name in self.services.keys())
@@ -194,15 +171,19 @@ class SubdomainScanner:
         )
 
         start_time = time.time()
-        await self.tasks_subdomains(iterables)
+        report = await self.tasks_subdomains(iterables)
 
         elapsed = time.time() - start_time
         print(
             f"Scan completed in {elapsed:.2f} seconds. "
-            f"Found {len(self.subdomains)} subdomains. "
+            f"Found {len(combined_values(report))} subdomains. "
             f"Average: {elapsed / total_domains:.2f} seconds per domain"
         )
 
+        return report
+
+    async def get_results(self, iterables: list) -> set:
+        self.subdomains.update(combined_values(await self.get_report(iterables)))
         return self.subdomains
 
     async def close(self):
@@ -215,6 +196,15 @@ async def async_scan_subdomains(domains: list[str]) -> set[str]:
     """Async function to scan subdomains"""
     async with SubdomainScanner() as scanner:
         return await scanner.get_results(domains)
+
+
+async def async_subdomain_report(domains: list[str]) -> list[QueryResult]:
+    async with SubdomainScanner() as scanner:
+        return await scanner.get_report(domains)
+
+
+def scan_subdomain_report(domains: list[str]) -> list[QueryResult]:
+    return asyncio.run(async_subdomain_report(domains))
 
 
 def scan_subdomains(domains: list[str]) -> set[str]:
