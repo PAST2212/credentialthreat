@@ -20,13 +20,13 @@ The harness from the real-site scans recorded every request, CPU-heavy step, eve
 | crt.sh queries were cut off after 30 s | crt.sh answered Site C after 14 to 64 s and ends a query itself with HTTP 504 after 120 s. The scan fell back to 15 hosts from RapidDNS instead of 1,525. | `fd685a6` |
 | Discovery depended on two sources that fail on large domains | crt.sh answered every query with HTTP 502 for minutes; RapidDNS serves 100 rows without an account. AnubisDB, found through a GitHub code search for the request strings of both sources, added 1,903 hosts on Site C and 15,173 on Site E. [Source evaluation](../discovery-sources/README.md) | `8ff9f9c`, `334a1bf` |
 | Anubis proof-of-work challenges counted as `ok` | Anubis answers with HTTP 200. On Site D, 2,074 of 2,398 start pages read were the challenge, each about 7 KB with 0 to 9 links. An honest user agent got the same challenge. | `f57d7c1` |
-| Header lines over 8,190 bytes made a page unreadable | aiohttp rejected an 8,249-byte `Content-Security-Policy` with a `ClientResponseError`, counted as `error`. The page was lost with its links, and so were two login hosts that redirect to it. | `173a426` |
-| A value repeated in one text became one row per occurrence | Run 1 reported 20,349 candidates in 329 texts, up to 624 in one page. A page fetched again held one value in 151 links. The report redacts values, so these rows were identical. | `df3ce9b` |
-| The JWT rule matched any base64url JSON with dots | The repeated value was a signed link parameter with the header `{"v":"1"}`. A JWS or JWE header always names its algorithm, so the rule now requires `"alg":`. The first version of that rule began with a lookahead and took 9.5 s on a 40 KB base64 run; it now starts with its literal again. | `2825270`, `bcc4a0c` |
-| URL priority patterns matched the scanned domain itself | On Site E a pattern contained in the domain ranked all 5,714 resources high, so a URL limit would have selected alphabetically. | `ef53a5b` |
-| Answers that are not HTTP counted as `error` | Push and VPN endpoints answer on port 443 with binary data. Run 1 counted 12 link-stage requests as `error`, these answers and the header-limit losses in one bucket. Such answers are now `invalid response`. | `51658ec` |
-| Every `<link href>` was followed, including translations | Pages list their translations as `rel="alternate" hreflang`: 108 on one help page next to three stylesheets. In run 2, 80,643 of 91,570 resource URLs were such HTML pages, 32,937 on one host. A page and three of its translations carried the same `api_key` value. A first fix followed only the `<link>` rels a browser loads; run 3 showed that it also dropped two blog feeds whose matches appeared nowhere else, so only translations are skipped now. | `c1338af`, `a5e3356` |
-| One host's URLs filled a worker's whole window | Lists are sorted, so a host's URLs are contiguous, and a worker sends only 5 requests per host at once. In run 2, the URLs of a host that answered in about 10 s held every window: for 18 minutes the resource stage completed 150 instead of about 2,000 requests per minute. A 50-item window now holds a median of 7 hosts instead of 1. | `c0ef6c1` |
+| Header lines over 8,190 bytes made a page unreadable | aiohttp rejected an 8,249-byte `Content-Security-Policy` with a `ClientResponseError`, counted as `error`. The page was lost with its links, and so were two login hosts that redirect to it. | `2f3a439` |
+| A value repeated in one text became one row per occurrence | Run 1 reported 20,349 candidates in 329 texts, up to 624 in one page. A page fetched again held one value in 151 links. The report redacts values, so these rows were identical. | `e430275` |
+| The JWT rule matched any base64url JSON with dots | The repeated value was a signed link parameter with the header `{"v":"1"}`. A JWS or JWE header always names its algorithm, so the rule now requires `"alg":`. The first version of that rule began with a lookahead and took 9.5 s on a 40 KB base64 run; it now starts with its literal again. | `71246f6`, `4690372` |
+| URL priority patterns matched the scanned domain itself | On Site E a pattern contained in the domain ranked all 5,714 resources high, so a URL limit would have selected alphabetically. | `5814864` |
+| Answers that are not HTTP counted as `error` | Push and VPN endpoints answer on port 443 with binary data. Run 1 counted 12 link-stage requests as `error`, these answers and the header-limit losses in one bucket. Such answers are now `invalid response`. | `43093d2` |
+| Every `<link href>` was followed, including translations | Pages list their translations as `rel="alternate" hreflang`: 108 on one help page next to three stylesheets. In run 2, 80,643 of 91,570 resource URLs were such HTML pages, 32,937 on one host. A page and three of its translations carried the same `api_key` value. A first fix followed only the `<link>` rels a browser loads; run 3 showed that it also dropped two blog feeds whose matches appeared nowhere else, so only translations are skipped now. | `f908497`, `2b07e74` |
+| One host's URLs filled a worker's whole window | Lists are sorted, so a host's URLs are contiguous, and a worker sends only 5 requests per host at once. In run 2, the URLs of a host that answered in about 10 s held every window: for 18 minutes the resource stage completed 150 instead of about 2,000 requests per minute. A 50-item window now holds a median of 7 hosts instead of 1. | `389596c` |
 
 ## Checked and ruled out
 
@@ -38,7 +38,7 @@ The harness from the real-site scans recorded every request, CPU-heavy step, eve
 
 ## Site E before and after the fixes
 
-| Site E, same 16,029 hosts | Run 1 (`334a1bf`) | Run 3 (`c0ef6c1`) |
+| Site E, same 16,029 hosts | Run 1 (`334a1bf`) | Run 3 (`389596c`) |
 | --- | ---: | ---: |
 | Elapsed | 1,671 s | 642 s |
 | Link stage / page stage / resource stage | 185 s / 1,254 s / 218 s | 233 s / 388 s / 11 s |
@@ -52,13 +52,13 @@ The harness from the real-site scans recorded every request, CPU-heavy step, eve
 
 The start pages linked 16,744 pages in run 3 and 17,378 in run 1, because the site changed between the runs. The page stage was 3.2 times as fast: the main shop host throttled again, but its pages now took turns with the other hosts instead of forming the stage's last twelve minutes, and no page was given up after a 503 or 429. The 12 `error` outcomes of run 1 were non-HTTP answers and pages behind the long header; run 3 had none.
 
-Run 3 used the first, stricter `<link>` filter. Of run 1's 5,714 resources, 4,581 had no file extension, 61% of them with a language code in the path; all 149 scripts of run 1 were requested in run 3 as well. The stricter filter also dropped two blog feeds whose two `dbuser` matches appeared nowhere else, and that is why `a5e3356` now skips only translations. A scan with the final code therefore fetches feeds, markdown copies and the other link targets again, somewhat more than run 3's 331 resources. Eleven `aws_keys` matches of run 1 were in translations of one glossary page; run 3 read the original page and matched it there.
+Run 3 used the first, stricter `<link>` filter. Of run 1's 5,714 resources, 4,581 had no file extension, 61% of them with a language code in the path; all 149 scripts of run 1 were requested in run 3 as well. The stricter filter also dropped two blog feeds whose two `dbuser` matches appeared nowhere else, and that is why `2b07e74` now skips only translations. A scan with the final code therefore fetches feeds, markdown copies and the other link targets again, somewhat more than run 3's 331 resources. Eleven `aws_keys` matches of run 1 were in translations of one glossary page; run 3 read the original page and matched it there.
 
 Of the 132 candidates in run 3, 108 are JWT-shaped strings whose header names an algorithm; the signed link parameter and its repetitions are gone. Values were not stored, so the candidates were not classified further.
 
 ## Group F
 
-Run 2 used the fixes up to `bcc4a0c` and seven domains. Discovery took 43 s and returned 70,339 in-scope hosts. The resource stage was stopped after the defects above had been measured, because the translations it was fetching would have taken hours longer.
+Run 2 used the fixes up to `4690372` and seven domains. Discovery took 43 s and returned 70,339 in-scope hosts. The resource stage was stopped after the defects above had been measured, because the translations it was fetching would have taken hours longer.
 
 | Group F, run 2 | Requests | Elapsed | Worker CPU | Body data | Matching |
 | --- | ---: | ---: | ---: | ---: | ---: |
