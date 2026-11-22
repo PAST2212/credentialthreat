@@ -202,11 +202,29 @@ class FetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.outcomes, Counter({"too many redirects": 1}))
 
     async def test_binary_content_type_is_not_downloaded(self):
-        for content_type in ("image/png", "application/pdf", "video/mp4", "font/woff2", "application/octet-stream"):
+        for content_type in ("image/png", "application/pdf", "video/mp4", "font/woff2"):
             with self.subTest(content_type=content_type):
                 binary = response(200, b"\x89PNG" * 1000, {"Content-Type": content_type})
                 self.assertIsNone(await self.fetch(session_returning(binary)))
                 self.assertEqual(binary.content.reads, 0)
+                self.assertEqual(self.outcomes, Counter({"binary": 1}))
+
+    async def test_text_with_a_generic_or_misleading_type_is_read(self):
+        # nginx sends application/octet-stream for any extension it has no type for (.env, .yml, .map, .bak)
+        # and video/mp2t for TypeScript sources (.ts).
+        for content_type in ("application/octet-stream", "video/mp2t"):
+            with self.subTest(content_type=content_type):
+                body = "AWS_SECRET_ACCESS_KEY=PRIVATEFIXTUREONLY\n"
+                page = await self.fetch(session_returning(response(200, body, {"Content-Type": content_type})))
+                self.assertEqual(page.text, body)
+                self.assertEqual(self.outcomes, Counter({"ok": 1}))
+
+    async def test_binary_body_with_a_generic_type_stops_after_the_first_chunk(self):
+        for content_type in ("application/octet-stream", "video/mp2t"):
+            with self.subTest(content_type=content_type):
+                binary = response(200, b"\x47\x00\x11\x10" * 100_000, {"Content-Type": content_type})
+                self.assertIsNone(await self.fetch(session_returning(binary)))
+                self.assertEqual(binary.content.reads, 1)
                 self.assertEqual(self.outcomes, Counter({"binary": 1}))
 
     async def test_text_content_types_are_read(self):

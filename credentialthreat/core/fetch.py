@@ -27,8 +27,12 @@ MAX_RETRY_DELAY = 30.0
 CHUNK_BYTES = 64 * 1024
 # SVG is XML text and can carry script, so it stays readable.
 BINARY_CONTENT = re.compile(
-    r"(image/(?!svg)|audio/|video/|font/|application/(pdf|zip|gzip|x-gzip|x-tar|x-rar|x-7z|octet-stream"
+    r"(image/(?!svg)|audio/|video/(?!mp2t)|font/|application/(pdf|zip|gzip|x-gzip|x-tar|x-rar|x-7z"
     r"|vnd\.ms-|msword|vnd\.openxmlformats|wasm))", re.IGNORECASE)
+# Types that say nothing about the body: nginx sends application/octet-stream for every extension it has no type
+# for (.env, .yml, .map, .bak) and video/mp2t for TypeScript sources (.ts). The first chunk decides: binary data
+# holds NUL bytes, text does not.
+GENERIC_CONTENT = re.compile(r"(application/octet-stream|video/mp2t)\b", re.IGNORECASE)
 
 
 # aiohttp rejects a header line over 8,190 bytes by default. A production page sent an 8,249-byte
@@ -157,10 +161,13 @@ def _redirect_target(url: str, location: str | None, scope) -> str | None:
     return target if target and url_in_scope(target, scope) else None
 
 
-async def _read_text(response, max_bytes: int) -> tuple[str, bool]:
+async def _read_text(response, max_bytes: int, sniff: bool = False) -> tuple[str, bool] | None:
+    """The body as text and whether it was cut, or None when `sniff` finds a NUL byte in the first chunk."""
     body = bytearray()
     truncated = False
     async for chunk in response.content.iter_chunked(CHUNK_BYTES):
+        if sniff and not body and b"\0" in chunk:
+            return None
         body += chunk
         if len(body) > max_bytes:
             del body[max_bytes:]
@@ -176,8 +183,8 @@ async def fetch_text(session, url: str, headers: dict, *, scope=(), limiter=None
 
     Redirects are followed only to URLs inside ``scope`` (at most MAX_REDIRECTS hops); every hop
     goes through the same connector checks. 429/503 and read timeouts are retried, connect timeouts
-    up to ``connect_retries`` times. Bot challenges and binary content types are not downloaded, and
-    bodies are cut at ``max_bytes``. Error-status bodies are returned for scanning but counted as
+    up to ``connect_retries`` times. Bot challenges and binary content types are not downloaded, a generic type
+    is read unless its first chunk holds a NUL byte, and bodies are cut at ``max_bytes``. Error-status bodies are returned for scanning but counted as
     ``HTTP <status> read``, not ``ok``. Each call adds exactly one entry to ``outcomes``.
     """
     outcomes = outcomes if outcomes is not None else Counter()
@@ -223,7 +230,11 @@ async def fetch_text(session, url: str, headers: dict, *, scope=(), limiter=None
                             if BINARY_CONTENT.match(content_type):
                                 outcomes["binary"] += 1
                                 return None
-                            text, truncated = await _read_text(response, max_bytes)
+                            read = await _read_text(response, max_bytes, sniff=bool(GENERIC_CONTENT.match(content_type)))
+                            if read is None:
+                                outcomes["binary"] += 1
+                                return None
+                            text, truncated = read
                             if 200 <= status < 300:
                                 outcomes["truncated" if truncated else "ok"] += 1
                             else:
