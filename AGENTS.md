@@ -2,7 +2,7 @@
 
 ## Project Structure
 
-`credentialthreat.py` is the Python CLI entry point. It coordinates discovery, resource scanning, and report generation. Keep shared processing in `credentialthreat/core/`, where `files.py` handles domain input and CSV output. The three active discovery providers are implemented in `credentialthreat/recon/crtsh.py`, `credentialthreat/recon/rapiddns.py` and `credentialthreat/recon/anubisdb.py`.
+`credentialthreat.py` is the Python CLI entry point. It coordinates discovery, resource scanning, and report generation. Keep shared processing in `credentialthreat/core/`, where `files.py` handles domain input and CSV output. The active discovery providers are implemented in `credentialthreat/recon/crtsh.py`, `credentialthreat/recon/rapiddns.py` and `credentialthreat/recon/anubisdb.py` (host names) and `credentialthreat/recon/otx.py` (page URLs).
 
 The CLI reads one domain per line from `credentialthreat/data/input/domains.txt` and writes dated CSV reports under `credentialthreat/data/output/`. Keep local target lists and generated findings out of contributions.
 

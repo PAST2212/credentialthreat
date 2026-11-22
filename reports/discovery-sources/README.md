@@ -80,3 +80,21 @@ The other sources were not added:
 - **dnsrepo**, **Hudson Rock** and the **Wayback Machine** added fewer than 10 start pages each. dnsrepo is an HTML page without a published limit. Hudson Rock builds its URL list from infostealer data.
 
 HackerTarget, OTX and urlscan.io each found hosts that no other source knew. They are candidates if their limits can be confirmed, or if a user supplies keys.
+
+## URL sources
+
+Link discovery reads only the pages that a start page links to. Four keyless sources of page URLs were therefore measured on the large online retailer of the [large scans](../large-scans/README.md), against every URL its two crawls (runs 1 and 3) had requested. No target page was fetched while a scan ran.
+
+| Source | Result for the retailer |
+| --- | --- |
+| AlienVault OTX URL list | 40,565 URLs stated. The first 2,000 came in four requests of about 0.6 s; 1,954 of them were never requested by either crawl. Of 200 of these, fetched through the scanner's page stage, 146 were readable pages (73%) and 42 answered HTTP 404. The readable pages referenced 238 resources that neither crawl requested, 8 of them scripts, and 3 pages held candidates. |
+| urlscan.io search | 6,356 public scans, 100 per query, which gave 54 new page URLs. Anonymous search allows 100 queries per hour, a quota the `coverage` subcommand also uses. |
+| urlscan.io scan results, the URLs a browser loaded | HTTP 403 without an API key |
+| Wayback Machine CDX, domain query | HTTP 504 after 61 s |
+| Common Crawl index, domain query | The connection was closed. |
+
+On the manufacturing group (Site C), OTX listed 3,016 URLs. Of 150 that link discovery had not requested, 53 were readable pages (35%).
+
+Twelve consecutive OTX pages of the retailer drew no HTTP 429. Most answered in 0.4 to 0.8 s, some uncached pages in 11 to 20 s, and one ended with HTTP 504 after 60 s. Responses are cached for ten minutes. The stated total changed from 40,565 to 40,564 between two pages, so results drift over time.
+
+AlienVault OTX was added as a provider of page URLs. Its URLs go to the page stage, where `--limit` applies. It reads at most four pages of 500 URLs per domain, one second apart, and keeps the pages already read when a later one fails; the summary then reports a partial answer. OTX publishes no limit for anonymous use, and its passive-DNS endpoint already requires an API key, so the URL list may require one as well in the future. urlscan.io was not added, because each query yields few URLs and shares the `coverage` quota. The Wayback Machine and Common Crawl were not added, because their domain queries failed on the large domain.

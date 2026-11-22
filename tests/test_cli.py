@@ -274,6 +274,47 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(), 0)
         self.assertCountEqual([resource for _, resource in seen_resources], scripts)
 
+    def test_urls_from_url_sources_go_to_the_page_stage(self):
+        # A URL source names pages that no start page links to; they are pages to scan, not hosts.
+        main = CLI["main"]
+        utils = CLI["utils"]
+        host = "shop.example.com"
+        deep = f"https://docs.{host}/guide/deep-page"
+        linked = f"https://{host}/linked"
+        hosts_seen, pages_seen = [], []
+
+        def link_worker(args):
+            hosts_seen.extend(args[0])
+            return [linked], [], set(), [], {}
+
+        def page_worker(args):
+            pages_seen.extend(args[0])
+            return [], set(args[0]), [], {"ok": len(args[0])}
+
+        report = [QueryResult("crt.sh", host, 1, frozenset({f"docs.{host}"})),
+                  QueryResult("AlienVault OTX", host, 3, frozenset({deep, "https://other.example/x", f"https://{host}/logo.png"}),
+                              kind="urls")]
+        with contextlib.ExitStack() as stack:
+            files_mock = Mock()
+            files_mock.return_value.get_domains.return_value = [host]
+            stack.enter_context(patch.object(utils, "get_workers", return_value=1))
+            stack.enter_context(patch.object(utils, "configure_platform_settings"))
+            stack.enter_context(patch.dict(main.__globals__, {
+                "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=10),
+                "ManageFiles": files_mock, "create_pool": ThreadPool,
+                "scan_subdomain_report": lambda domains: report,
+                "process_chunks_for_internallinks": link_worker,
+                "process_chunks_for_networksearch": page_worker,
+                "process_chunks_for_credentialsearch": lambda arg: ([], {}, []),
+            }))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertLogs(level="INFO") as logs:
+                self.assertEqual(main(), 0)
+        self.assertCountEqual(hosts_seen, [f"docs.{host}", host])
+        self.assertCountEqual(pages_seen, [linked, deep])
+        self.assertIn("Page URLs from URL sources: 1", " ".join(logs.output))
+        self.assertNotIn(deep, " ".join(logs.output))
+
     def test_url_limits_rank_urls_without_the_configured_domain(self):
         # The configured domain contains the pattern `acl`. Ranked with it, every URL is high priority and a URL
         # limit keeps the alphabetically first ones.

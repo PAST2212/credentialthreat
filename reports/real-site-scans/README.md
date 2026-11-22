@@ -160,7 +160,7 @@ The module imports worked as intended. 164 imported modules in run 1 and 296 in 
 ## Open limits
 
 - Scripts whose URLs are computed at runtime are not found. On Site B these are a third of the in-scope scripts on the home page.
-- Pages are found only through links on the start pages.
+- Pages are found only through links on the start pages. (Since the [large scans](../large-scans/README.md), AlienVault OTX also supplies page URLs.)
 - Bot-management services other than Kasada, Cloudflare and Anubis are not recognized. A challenge from another service counts as an error status, and its body is scanned like any other error page.
 - Peak RSS reached 724 MiB with five workers. The workers alone took about 530 MiB during the link stage, before any large page was parsed.
 - Matching still binds the page stage to the CPU. The alternation over the field names costs about 0.17 s per MB, and in run 4 the event loop of each page worker was blocked for 9–11 s.

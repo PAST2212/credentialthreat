@@ -203,12 +203,82 @@ class ProviderResultsTests(unittest.IsolatedAsyncioTestCase):
                 await self.query(name, error=asyncio.CancelledError())
 
 
+def otx_page(urls, has_next, full_size):
+    return json.dumps({"url_list": [{"url": url, "domain": HOST} for url in urls], "has_next": has_next,
+                       "full_size": full_size, "page_num": 1, "limit": 500})
+
+
+class OtxUrlTests(unittest.IsolatedAsyncioTestCase):
+    # AlienVault OTX lists URLs seen under a domain. On a large retailer, 146 of 200 URLs that the crawl had never
+    # requested were readable pages: pages that no start page links to.
+    async def report(self, *replies):
+        from credentialthreat.recon.otx import ScanerOtxUrls
+        session = Mock()
+        session.get.side_effect = list(replies)
+        with patch("asyncio.sleep", new=AsyncMock()) as pause:
+            result, = await ScanerOtxUrls().get_report([HOST], session)
+        return result, session, pause
+
+    async def test_page_urls_in_scope_are_reported_as_urls(self):
+        result, session, _ = await self.report(FixtureResponse(otx_page([
+            f"https://{CHILD}/docs/start#top", f"http://{HOST}/a?b=1", "https://other.example/x",
+            f"https://{CHILD}/logo.png", f"https://user:pw@{CHILD}/private", "not a url"], False, 6)))
+        self.assertEqual((result.provider, result.kind, result.state, result.records), ("AlienVault OTX", "urls", "hits", 6))
+        self.assertEqual(result.values, {f"https://{CHILD}/docs/start", f"http://{HOST}/a?b=1"})
+        url, = session.get.call_args.args
+        self.assertEqual((urlsplit(url).hostname, urlsplit(url).path),
+                         ("otx.alienvault.com", f"/api/v1/indicators/domain/{HOST}/url_list"))
+        self.assertEqual(session.get.call_args.kwargs["params"], {"limit": 500, "page": 1})
+
+    async def test_pages_are_read_up_to_the_cap_with_a_pause_between_them(self):
+        from credentialthreat.recon.otx import ScanerOtxUrls
+        cap = ScanerOtxUrls.max_pages
+        pages = [FixtureResponse(otx_page([f"https://{CHILD}/p{page}/{i}" for i in range(2)], True, 900))
+                 for page in range(cap + 3)]
+        result, session, pause = await self.report(*pages)
+        self.assertEqual([call.kwargs["params"]["page"] for call in session.get.call_args_list], list(range(1, cap + 1)))
+        self.assertEqual((len(result.values), result.records, result.available, result.partial), (2 * cap, 2 * cap, 900, True))
+        self.assertEqual(pause.await_count, cap - 1)
+        self.assertGreaterEqual(pause.await_args.args[0], 1)
+
+    async def test_a_failing_later_page_keeps_the_urls_already_read(self):
+        # A later page answered HTTP 504 after 60 s; the earlier pages are still valid.
+        for failure in (FixtureResponse(PRIVATE, 504), asyncio.TimeoutError(PRIVATE), dns_failure()):
+            with self.subTest(failure=type(failure).__name__):
+                result, _, _ = await self.report(FixtureResponse(otx_page([f"https://{CHILD}/a"], True, 900)), failure)
+                self.assertEqual((result.state, result.reason, result.values), ("hits", None, {f"https://{CHILD}/a"}))
+                self.assertEqual((result.records, result.available, result.partial), (1, 900, True))
+
+    async def test_empty_failed_and_malformed_first_pages(self):
+        empty, _, _ = await self.report(FixtureResponse(otx_page([], False, 0)))
+        self.assertEqual((empty.state, empty.records, empty.reason), ("empty", 0, None))
+        dns, _, _ = await self.report(dns_failure())
+        self.assertEqual((dns.state, dns.reason), ("error", "DNS"))
+        retried, session, _ = await self.report(FixtureResponse(PRIVATE, 504), FixtureResponse(PRIVATE, 504))
+        self.assertEqual((retried.reason, session.get.call_count), ("HTTP 504", 2))
+        for body in ('{"url_list": "x", "has_next": false}', "<html>sign in</html>",
+                     json.dumps({"url_list": [{"url": 5}], "has_next": False, "full_size": 1}),
+                     json.dumps({"url_list": [], "has_next": "no", "full_size": 0})):
+            with self.subTest(body=body):
+                malformed, _, _ = await self.report(FixtureResponse(body))
+                self.assertEqual((malformed.state, malformed.reason, malformed.values), ("error", "unexpected format", frozenset()))
+
+    async def test_host_providers_report_hosts(self):
+        for name in TYPES:
+            with self.subTest(provider=name):
+                session = Mock()
+                session.get.return_value = FixtureResponse(HITS[name])
+                result, = await TYPES[name]().get_report([HOST], session)
+                self.assertEqual(result.kind, "hosts")
+
+
 class ProviderCliTests(unittest.TestCase):
     def assert_discovery_limits(self, output):
         for service, details in (
             ("crt.sh HTTPS", ("per IP", "2023-06-09", " 5/minute,")),
             ("RapidDNS web search", ("per public IP", " 30/minute,")),
             ("AnubisDB API", ("per source IP", " 360/minute (60 per 10 seconds),")),
+            ("AlienVault OTX URL list", ("without API key", "minute unknown,", "at most 4 requests per domain")),
         ):
             line = next((line for line in output.splitlines() if service in line), "")
             self.assertTrue(line, f"Missing request limits for {service}")
@@ -246,6 +316,11 @@ class ProviderCliTests(unittest.TestCase):
                         if scenario == "malformed":
                             return FixtureResponse('{"error":"Invalid domain"}')
                         return FixtureResponse('["' + CHILD + '"]' if scenario == "partial" else "[]")
+                    if provider == "otx.alienvault.com":
+                        if scenario == "malformed":
+                            return FixtureResponse("<html>Service unavailable</html>")
+                        return FixtureResponse(otx_page([f"https://{CHILD}/deep"] if scenario == "partial" else [], False,
+                                                        1 if scenario == "partial" else 0))
                     raise AssertionError("unexpected request")
 
                 fetch = stack.enter_context(patch.object(aiohttp.ClientSession, "get", side_effect=request))
@@ -272,7 +347,7 @@ class ProviderCliTests(unittest.TestCase):
                     code = main()
                 output = " ".join(logs.output) + console.getvalue()
                 requested_hosts = [urlsplit(call.args[0]).hostname for call in fetch.call_args_list]
-                self.assertCountEqual(requested_hosts, ["crt.sh", "rapiddns.io", "anubisdb.com"])
+                self.assertCountEqual(requested_hosts, ["crt.sh", "rapiddns.io", "anubisdb.com", "otx.alienvault.com"])
                 submit.assert_not_called()
                 self.assert_discovery_limits(output)
                 self.assertNotIn("wayback", output.lower())
@@ -281,6 +356,10 @@ class ProviderCliTests(unittest.TestCase):
                 self.assertEqual(code, int(incomplete))
                 self.assertEqual("Report written with incomplete discovery" in output, incomplete)
                 self.assertIn("crt.sh: hits=1" if scenario == "partial" else "crt.sh: hits=0 empty=1", output)
+                if scenario == "malformed":
+                    self.assertIn("AlienVault OTX: hits=0 empty=0 filtered=0 errors=1 (unexpected format=1)", output)
+                else:
+                    self.assertIn("AlienVault OTX: hits=1" if scenario == "partial" else "AlienVault OTX: hits=0 empty=1", output)
                 if scenario == "malformed":
                     self.assertIn("AnubisDB: hits=0 empty=0 filtered=0 errors=1 (unexpected format=1)", output)
                 else:

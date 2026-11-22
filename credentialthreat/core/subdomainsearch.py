@@ -11,6 +11,7 @@ from credentialthreat.core.discovery import QueryResult, combined_values, error_
 from credentialthreat.core.website import PublicDestinationConnector
 from credentialthreat.recon.anubisdb import ScanerAnubisDb
 from credentialthreat.recon.crtsh import ScanerCrtsh
+from credentialthreat.recon.otx import ScanerOtxUrls
 from credentialthreat.recon.rapiddns import ScanerRapidDns
 
 
@@ -32,6 +33,11 @@ SUBDOMAIN_SERVICES = {
     },
     'anubisdb': {
         'scanner': ScanerAnubisDb,
+        'rate_limit': 10
+    },
+    # Page URLs instead of host names (QueryResult.kind "urls"); the CLI sends them to the page stage.
+    'otx': {
+        'scanner': ScanerOtxUrls,
         'rate_limit': 10
     },
 }

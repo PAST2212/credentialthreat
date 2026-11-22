@@ -72,6 +72,6 @@ The scan completed 114,254 requests. Of the 70,339 hosts, 42,866 did not resolve
 
 - **Matching binds the page stage to the CPU.** At 0.3 s per MB it took 2,140 of 3,588 CPU seconds in run 2's page stage, and each page worker's event loop was blocked for 490 to 730 s in total, up to 7.7 s at once.
 - **crt.sh receives several queries per batch.** Run 2 sent seven within 43 s; crt.sh publishes 5 per minute. None failed.
-- **Pages are found only through the start pages' links.** Keyless URL sources are evaluated next.
+- **Pages were found only through the start pages' links.** AlienVault OTX now adds page URLs; see the [source evaluation](../discovery-sources/README.md#url-sources).
 - **Bot-management services** other than Kasada, Cloudflare and Anubis are not recognized.
 - Run 2 did not finish its resource stage, so its candidates are not reported here.

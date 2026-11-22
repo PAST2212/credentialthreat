@@ -22,6 +22,7 @@ class QueryResult:
     values: frozenset[str] = field(default_factory=frozenset, repr=False)
     reason: str | None = None
     available: int | None = None  # records the provider states it holds; above `records`, the answer is partial
+    kind: str = "hosts"  # what `values` holds: host names, or page URLs ("urls") for the page stage
 
     @property
     def partial(self) -> bool:
@@ -70,13 +71,14 @@ def error_reason(provider: str, exc: Exception) -> str:
     return type(exc).__name__
 
 
-async def observe(provider: str, domain: str, query: Awaitable[tuple]) -> QueryResult:
-    """Run one provider query: (records, hosts) or (records, hosts, records the provider states it holds)."""
+async def observe(provider: str, domain: str, query: Awaitable[tuple], kind: str = "hosts") -> QueryResult:
+    """Run one provider query: (records, values) or (records, values, records the provider states it holds)."""
     try:
         records, values, *available = await query
-        return QueryResult(provider, domain, records, frozenset(values), available=available[0] if available else None)
+        return QueryResult(provider, domain, records, frozenset(values), available=available[0] if available else None,
+                           kind=kind)
     except Exception as exc:
-        return QueryResult(provider, domain, None, reason=error_reason(provider, exc))
+        return QueryResult(provider, domain, None, reason=error_reason(provider, exc), kind=kind)
 
 
 def combined_values(results: Iterable[QueryResult]) -> set[str]:
@@ -86,6 +88,7 @@ def combined_values(results: Iterable[QueryResult]) -> set[str]:
 class SubdomainProvider:
     name: str
     retry_pause: float = 15.0  # seconds before repeating a query that failed with a server error
+    kind: str = "hosts"  # "urls" for a provider whose values are page URLs
 
     def __init__(self):
         self.results: set[str] = set()
@@ -94,10 +97,10 @@ class SubdomainProvider:
         raise NotImplementedError
 
     async def _query(self, session, domain) -> QueryResult:
-        result = await observe(self.name, domain, self._scrape_subdomains(session, domain))
+        result = await observe(self.name, domain, self._scrape_subdomains(session, domain), self.kind)
         if result.reason is not None and result.reason.startswith("HTTP 5"):
             await asyncio.sleep(self.retry_pause)
-            result = await observe(self.name, domain, self._scrape_subdomains(session, domain))
+            result = await observe(self.name, domain, self._scrape_subdomains(session, domain), self.kind)
         return result
 
     async def get_report(self, domains, session) -> list[QueryResult]:

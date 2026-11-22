@@ -27,7 +27,9 @@ DISCOVERY_LIMITS = (
     "Published request limits for website discovery\n"
     "  crt.sh HTTPS (per IP, published 2023-06-09): 5/minute, hour unknown, day unknown\n"
     "  RapidDNS web search (per public IP): 30/minute, hour unknown, day unknown\n"
-    "  AnubisDB API (per source IP): 360/minute (60 per 10 seconds), hour unknown, day unknown"
+    "  AnubisDB API (per source IP): 360/minute (60 per 10 seconds), hour unknown, day unknown\n"
+    "  AlienVault OTX URL list (without API key): minute unknown, hour unknown, day unknown; "
+    "at most 4 requests per domain"
 )
 
 
@@ -180,8 +182,13 @@ def _run_scan(killer):
             if log_query_summary(report):
                 status = 1
             partial_discovery = any(result.partial for result in report)
-            subdomains = [host for host in combined_values(report) if host_in_scope(host, domains)]
+            subdomains = [host for host in combined_values(r for r in report if r.kind == "hosts")
+                          if host_in_scope(host, domains)]
             logging.info("Discovered subdomains in scope: %d", len(subdomains))
+            # URL sources name pages that no start page may link to; the page stage scans them like linked pages.
+            source_pages = sorted({url for url in map(canonical_url, combined_values(r for r in report if r.kind == "urls"))
+                                   if url and url_in_scope(url, domains) and not is_binary_url(url)})
+            logging.info("Page URLs from URL sources: %d", len(source_pages))
             logging.info(FG + 'End Subdomain Scan' + S)
 
         except Exception as e:
@@ -224,6 +231,7 @@ def _run_scan(killer):
             logging.error("Error during internal URL scanning (%s)", type(e).__name__)
             return 1
         _log_outcomes("Internal URL scan", link_outcomes)
+        internal_links.update(source_pages)
 
         # Sorted, so that a URL limit keeps the same pages on every run. The link stage already scanned the start pages.
         host_names_normalized = sorted({url for url in map(canonical_url, internal_links)
