@@ -14,7 +14,7 @@ from aiolimiter import AsyncLimiter
 from bs4 import BeautifulSoup
 from bs4 import MarkupResemblesLocatorWarning
 from bs4 import XMLParsedAsHTMLWarning
-from credentialthreat.core.credentialsearch import ScanerCredentials
+from credentialthreat.core.credentialsearch import ScanerCredentials, script_imports
 from credentialthreat.core.fetch import HostPacer, Page, fetch_text, get_header, website_session
 from credentialthreat.core.interrupt_handler import AsyncCancellationManager
 from credentialthreat.core.website import (PublicDestinationConnector, canonical_url, module_imports, report_origin,
@@ -67,15 +67,15 @@ class ScanerNetworkResources:
                 pass
         return BeautifulSoup(markup, 'html.parser')
 
-    async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, tuple[str, str, BeautifulSoup]]:
-        """Final page URL, page text and parsed markup, or None when the page could not be read."""
+    async def _get_request(self, url: str, header, session: aiohttp.ClientSession) -> Union[None, tuple[Page, BeautifulSoup]]:
+        """The page as read (final URL, status, text, content type) and its parsed markup, or None when it could not be read."""
         # Parsing or matching another page can block this worker's loop past sock_connect and turn a connection
         # that succeeded into a connect timeout, so retry once (a dead host costs one more connect timeout).
         page = await fetch_text(session, url, header, scope=self.scope, limiter=self.rate_limiter,
                                 pacer=self.pacer, outcomes=self.outcomes, connect_retries=1)
         if page is None:
             return None
-        return page.url, page.text, self.parse(page)
+        return page, self.parse(page)
 
     @staticmethod
     def _clean_url(url: str) -> str:
@@ -149,9 +149,13 @@ class ScanerNetworkResources:
             self.pages.add(url)
             fetched = await self._get_request(url, header, session)
             if fetched is not None:
-                url, text, soup = fetched
+                page, soup = fetched
+                url = page.url
                 self.pages.add(url)
-                results, candidates = self.scan_page(url, text, soup, domains_input)
+                results, candidates = self.scan_page(url, page.text, soup, domains_input)
+                # A script in the page list (from a URL source, for example) is not fetched again in the
+                # credential stage, so the modules it imports become resources here.
+                results.extend(ScrapNetworkUrls(url, module) for module in script_imports(page, domains_input))
 
         except Exception:
             self.pages.add(url)

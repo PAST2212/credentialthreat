@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from requests.certs import where as public_ca_bundle
 
 from credentialthreat.core import website
+from credentialthreat.core.fetch import Page
 from credentialthreat.core.subdomainsearch import SubdomainScanner
 from http_doubles import response as http_response
 
@@ -256,6 +257,7 @@ class WebsiteSafetyTests(unittest.IsolatedAsyncioTestCase):
         html = """<script src="/local.js"></script>
         <script src="https://example.com.other.invalid/bad.js"></script>
         <script>require("https://elsewhere.invalid/other.js")</script>"""
-        with patch.object(scanner, "_get_request", new=AsyncMock(return_value=(SITE, html, BeautifulSoup(html, "html.parser")))):
+        page = Page(SITE, 200, html, "text/html")
+        with patch.object(scanner, "_get_request", new=AsyncMock(return_value=(page, BeautifulSoup(html, "html.parser")))):
             found, _ = await scanner._fetch_network_sources(SITE, ["example.com"], PSL, {}, Mock())
         self.assertEqual({item.script_url for item in found}, {SITE + "/local.js"})

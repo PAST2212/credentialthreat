@@ -35,6 +35,16 @@ def fold_case(text: str) -> str:
     return text.lower()
 
 
+def script_imports(page: Page, scope) -> list[str]:
+    """The in-scope modules a script that loaded (JavaScript, 2xx) imports, in order of appearance."""
+    content_type = page.content_type
+    is_script = "javascript" in content_type or "ecmascript" in content_type or (
+        not content_type and urlsplit(page.url).path.endswith((".js", ".mjs")))
+    if not is_script or not 200 <= page.status < 300:
+        return []
+    return [url for specifier in module_imports(page.text) if (url := resolve_reference(page.url, specifier, scope))]
+
+
 class ScanerCredentials:
     def __init__(self, max_concurrent_requests: int = 25, window_size: int = 50, scope=(),
                  host_connections: int | None = None) -> None:
@@ -134,14 +144,7 @@ class ScanerCredentials:
 
     def _collect_imports(self, origin_url: str, page: Page) -> None:
         """Remember the in-scope modules a script that loaded imports; the CLI fetches them in a later round."""
-        content_type = page.content_type
-        is_script = "javascript" in content_type or "ecmascript" in content_type or (
-            not content_type and urlsplit(page.url).path.endswith((".js", ".mjs")))
-        if not is_script or not 200 <= page.status < 300:
-            return
-        for specifier in module_imports(page.text):
-            if url := resolve_reference(page.url, specifier, self.scope):
-                self.imports.add((origin_url, url))
+        self.imports.update((origin_url, url) for url in script_imports(page, self.scope))
 
     def _findings(self, data: str) -> list[tuple[str, str]]:
         labels_by_span: dict[tuple[int, int], list[str]] = {}

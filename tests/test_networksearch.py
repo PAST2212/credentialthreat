@@ -71,6 +71,27 @@ class PageCandidateTests(unittest.IsolatedAsyncioTestCase):
             "https://www.example.com/de/js/m.js", "https://www.example.com/lazy.js", "https://static.example.com/s.js",
         ])
 
+    async def test_script_read_as_a_page_contributes_its_module_imports(self):
+        # URL sources such as OTX list scripts next to pages. The credential stage skips a script that the page
+        # stage already read, so the modules it imports have to be collected here.
+        script = ('import{a}from"./chunk.js";import("/lazy.js");import"https://cdn.other.invalid/x.js";'
+                  'var api_key = "PRIVATEFIXTUREONLY";')
+        url = "https://www.example.com/assets/index.js"
+        session = session_returning(response(200, script, {"Content-Type": "application/javascript"}))
+        scanner = ScanerNetworkResources(scope=["example.com"])
+        found, candidates = await scanner._fetch_network_sources(url, ["example.com"], PSL, {}, session)
+        self.assertCountEqual([(item.origin_url, item.script_url) for item in found], [
+            (url, "https://www.example.com/assets/chunk.js"), (url, "https://www.example.com/lazy.js"),
+        ])
+        self.assertEqual(candidates, [("https://www.example.com", "https://www.example.com",
+                                       [("api_key", "[REDACTED]")])])
+
+    async def test_html_text_is_not_searched_for_module_imports(self):
+        html = '<pre>import x from "./example.js";</pre>'
+        session = session_returning(response(200, html, {"Content-Type": "text/html"}))
+        scanner = ScanerNetworkResources(scope=["example.com"])
+        self.assertEqual(await scanner._fetch_network_sources(PAGE, ["example.com"], PSL, {}, session), ([], []))
+
     async def test_bot_challenge_page_contributes_no_resources(self):
         session = session_returning(response(
             400, '<script src="/149e/ips.js?KP_UIDz=PRIVATEFIXTUREONLY"></script>',
