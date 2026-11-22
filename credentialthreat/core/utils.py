@@ -33,11 +33,16 @@ def configure_platform_settings():
 
 
 def deduplicate_script_urls(whitelist: list[ScrapNetworkUrls], blacklist: set[str]) -> list[tuple[str, str]]:
-    """Deduplicate network URLs, keeping only unique script URLs that are not in the blacklist."""
+    """Deduplicate network URLs, keeping only unique script URLs that are not in the blacklist.
+
+    A script that several pages reference keeps the smallest origin URL, so the report names the same page on every
+    run whichever page finished first.
+    """
     network_files_dict = {}
     for item in whitelist:
         # Use script_url as key and origin_url as value
-        network_files_dict[item.script_url] = item.origin_url
+        if item.script_url not in network_files_dict or item.origin_url < network_files_dict[item.script_url]:
+            network_files_dict[item.script_url] = item.origin_url
 
     new_network_files = [(value, key) for key, value in network_files_dict.items() if key not in blacklist]
 
@@ -353,8 +358,9 @@ class UrlPrioritizer:
 
         is_internal = isinstance(urls[0], str)
         url_type = "Internal" if is_internal else "Network"
-        # Sorting makes the selection under a limit independent of discovery order.
-        urls = sorted(urls)
+        # Sorting makes the selection under a limit independent of discovery order. Resources sort by their own URL:
+        # which page a shared resource is credited to depends on which page finished first.
+        urls = sorted(urls) if is_internal else sorted(urls, key=lambda pair: (pair[1], pair[0]))
 
         seen_urls = set()
         high_priority = []

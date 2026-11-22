@@ -274,6 +274,37 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(), 0)
         self.assertCountEqual([resource for _, resource in seen_resources], scripts)
 
+    def test_resource_limit_keeps_the_same_resources_whatever_order_pages_finish_in(self):
+        # Link workers collect a start page's resources when the page finishes, so a script that several start
+        # pages reference arrives first from whichever answered first.
+        main = CLI["main"]
+        utils = CLI["utils"]
+        host = "shop.example.com"
+        shared, other = f"https://{host}/s/b.txt", f"https://{host}/s/a.txt"
+        found = [utils.ScrapNetworkUrls(f"https://a.{host}/", shared), utils.ScrapNetworkUrls(f"https://z.{host}/", shared),
+                 utils.ScrapNetworkUrls(f"https://m.{host}/", other)]
+
+        def credential_input(resources):
+            seen = []
+            with contextlib.ExitStack() as stack:
+                files_mock = Mock()
+                files_mock.return_value.get_domains.return_value = [host]
+                stack.enter_context(patch.object(utils, "get_workers", return_value=1))
+                stack.enter_context(patch.object(utils, "configure_platform_settings"))
+                stack.enter_context(patch.dict(main.__globals__, {
+                    "time": Mock(perf_counter=time.perf_counter), "parse_arguments": lambda: Mock(limit=1),
+                    "ManageFiles": files_mock, "create_pool": ThreadPool,
+                    "scan_subdomain_report": lambda domains: [QueryResult("crt.sh", host, 0)],
+                    "process_chunks_for_internallinks": lambda args: ([], resources, set(), [], {}),
+                    "process_chunks_for_credentialsearch": lambda arg: (seen.extend(arg[0]), ([], {}, []))[1],
+                }))
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                with self.assertLogs(level="INFO"):
+                    self.assertEqual(main(), 0)
+            return seen
+
+        self.assertEqual(credential_input(found), credential_input(list(reversed(found))))
+
     def test_urls_from_url_sources_go_to_the_page_stage(self):
         # A URL source names pages that no start page links to; they are pages to scan, not hosts.
         main = CLI["main"]

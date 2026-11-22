@@ -281,7 +281,6 @@ def _run_scan(killer):
                 return 1
             _log_outcomes("Network resource scan", page_outcomes)
 
-        network_files_whitelist = list({obj.script_url: obj for obj in reversed(network_files_whitelist)}.values())
         # The page workers already matched every page they requested, so the credential stage, and the
         # --limit applied to it, covers only the other resources.
         network_files_normalized = utils.deduplicate_script_urls(whitelist=network_files_whitelist, blacklist=scanned_pages)

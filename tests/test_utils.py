@@ -38,6 +38,14 @@ class PrioritizerTests(unittest.TestCase):
         urls = [f"https://www.example.com/p/{i}" for i in range(6)]
         self.assertEqual(pick(urls, 3), pick(list(reversed(urls)), 3))
 
+    def test_resource_selection_under_a_limit_does_not_depend_on_their_origins(self):
+        # The origin kept for a resource that several pages reference depends on which page finished first.
+        resources = [f"https://www.example.com/s/{name}.txt" for name in "abc"]
+        origins = ["https://a.example.com/", "https://m.example.com/", "https://z.example.com/"]
+        selected = [[resource for _, resource in pick(list(zip(order, resources)), 2)]
+                    for order in (origins, list(reversed(origins)))]
+        self.assertEqual(selected[0], selected[1])
+
 
 class FinalSelectionLogTests(unittest.TestCase):
     # On one production site the log read `High Priority: 586 (100.0%)` for a selection with 141 high-priority URLs.
