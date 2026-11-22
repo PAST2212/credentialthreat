@@ -14,6 +14,7 @@ class ScanerAnubisDb(SubdomainProvider):
     """
     name = "AnubisDB"
     retry_pause = 5.0  # published limit: 60 requests per 10 seconds
+    query_interval = 0.2
 
     @staticmethod
     async def _scrape_subdomains(session: aiohttp.ClientSession, domain: str) -> tuple[int, set[str]]:

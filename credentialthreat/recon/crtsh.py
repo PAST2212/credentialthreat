@@ -14,6 +14,7 @@ QUERY_TIMEOUT = aiohttp.ClientTimeout(total=150, connect=10)
 class ScanerCrtsh(SubdomainProvider):
     name = "crt.sh"
     retry_pause = 15.0  # published limit: 5 requests per minute
+    query_interval = 12.0
 
     @staticmethod
     async def _scrape_subdomains(session: aiohttp.ClientSession, domain: str) -> tuple[int, set[str]]:

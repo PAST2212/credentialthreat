@@ -21,6 +21,7 @@ def _stated_total(soup: BeautifulSoup) -> int | None:
 class ScanerRapidDns(SubdomainProvider):
     name = "RapidDNS"
     retry_pause = 5.0  # published limit: 30 requests per minute
+    query_interval = 2.0
 
     @staticmethod
     async def _scrape_subdomains(session: aiohttp.ClientSession, domain: str) -> tuple[int, set[str], int | None]:

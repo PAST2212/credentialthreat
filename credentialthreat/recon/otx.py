@@ -24,6 +24,7 @@ class ScanerOtxUrls(SubdomainProvider):
     max_pages = 4
     page_size = 500
     page_pause = 1.0  # seconds between two pages
+    query_interval = 1.0  # no published limit; the same pause as between pages
 
     @classmethod
     async def _scrape_subdomains(cls, session: aiohttp.ClientSession, domain: str) -> tuple[int, set[str], int | None]:

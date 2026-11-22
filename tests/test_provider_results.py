@@ -90,6 +90,19 @@ class ProviderResultsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(session.get.call_count, 2)
                 self.assertGreaterEqual(pause.await_args.args[0], minimum_pause)
 
+    async def test_queries_for_several_domains_keep_to_each_providers_published_rate(self):
+        # A scan of seven domains sent crt.sh seven queries within 43 s; crt.sh publishes 5 per minute.
+        for name, per_minute in (("crt.sh", 5), ("RapidDNS", 30), ("AnubisDB", 360)):
+            with self.subTest(provider=name):
+                session = Mock()
+                session.get.side_effect = [FixtureResponse(EMPTY[name]) for _ in range(3)]
+                with patch("asyncio.sleep", new=AsyncMock()) as pause:
+                    results = await TYPES[name]().get_report(["a.example", "b.example", "c.example"], session)
+                self.assertEqual([result.state for result in results], ["empty"] * 3)
+                self.assertEqual(pause.await_count, 2)
+                for call in pause.await_args_list:
+                    self.assertGreaterEqual(call.args[0], 60 / per_minute)
+
     async def test_client_errors_are_not_retried(self):
         for name in TYPES:
             for status in (403, 404, 429):
@@ -158,7 +171,8 @@ class ProviderResultsTests(unittest.IsolatedAsyncioTestCase):
         scanner = TYPES["crt.sh"]()
         session = Mock()
         session.get.side_effect = [dns_failure(), FixtureResponse(EMPTY["crt.sh"]), FixtureResponse(HITS["crt.sh"])]
-        results = await scanner.get_report(["unavailable.example", "empty.example", HOST], session)
+        with patch("asyncio.sleep", new=AsyncMock()):  # the pause between domains
+            results = await scanner.get_report(["unavailable.example", "empty.example", HOST], session)
         self.assertEqual([q.state for q in results], ["error", "empty", "hits"])
         async with SubdomainScanner() as coordinator:
             async def provider_batch(scanner, domains, service):

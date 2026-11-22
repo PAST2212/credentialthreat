@@ -88,6 +88,7 @@ def combined_values(results: Iterable[QueryResult]) -> set[str]:
 class SubdomainProvider:
     name: str
     retry_pause: float = 15.0  # seconds before repeating a query that failed with a server error
+    query_interval: float = 12.0  # seconds between two domains' queries, from the provider's published rate
     kind: str = "hosts"  # "urls" for a provider whose values are page URLs
 
     def __init__(self):
@@ -104,7 +105,13 @@ class SubdomainProvider:
         return result
 
     async def get_report(self, domains, session) -> list[QueryResult]:
-        return [await self._query(session, domain) for domain in domains]
+        # Domains are queried one after another; the pause keeps several domains within the published rate.
+        report = []
+        for index, domain in enumerate(domains):
+            if index:
+                await asyncio.sleep(self.query_interval)
+            report.append(await self._query(session, domain))
+        return report
 
     async def get_results(self, domains, session) -> set[str]:
         self.results.update(combined_values(await self.get_report(domains, session)))

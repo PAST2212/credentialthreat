@@ -90,6 +90,7 @@ A provider that states its total can return `(record_count, hosts, stated_total)
 - `SubdomainProvider._query` repeats a query once when it fails with an HTTP 5xx status, after the class's `retry_pause`. That pause is 15 s for crt.sh and 5 s for RapidDNS and AnubisDB, which keeps the retry within their published limits. Tests patch `asyncio.sleep` to skip the pause.
 - The discovery session allows 30 s per request. crt.sh answers large domains only after its database query (up to about a minute) and gives up itself after 120 s, so its requests carry their own 150 s timeout (`QUERY_TIMEOUT` in `recon/crtsh.py`).
 - Providers only read. AnubisDB accepts submissions, and the CLI provider test fails on any `ClientSession.post` call.
+- `SubdomainProvider.get_report` queries the domains one after another and pauses `query_interval` seconds between them, set per provider from its published rate (crt.sh 12 s for 5 per minute). Before, a scan of seven domains sent crt.sh seven queries within 43 s. Tests patch `asyncio.sleep` to skip it.
 - A provider whose values are page URLs sets `kind = "urls"` (`recon/otx.py`). OTX reads at most `max_pages` pages of 500 URLs with a 1 s pause; a failing later page keeps the URLs already read and reports the answer as partial, because deep pages took up to 60 s and ended with HTTP 504.
 
 `recon/dnsdumpster.py` and `recon/subdomaincenter.py` are legacy and not registered. Only a diagnostics test still imports them.
